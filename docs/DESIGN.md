@@ -1,6 +1,6 @@
 # agenthub 设计方案
 
-> 版本：v0.2（2026-10-05）
+> 版本：v0.3（2026-10-05）
 > 目标：把本地 ACP 编码 agent 桥接到 NATS 消息总线上，形成可发现、可派活、
 > 可编排的 agent 服务网格。IM（Octop）只是前端的一种。
 
@@ -30,6 +30,16 @@ agenthub **不绑定任何前端**。它的入口就是消息总线：
 - 统一权限审批（ACP 反转文件系统所有权，客户端可审计每次 read/edit/execute）
 - 统一事件流（session/update 分类事件，天然映射成总线消息）
 - 一次接入，所有 ACP 兼容 agent 通用（40+，还在增长）
+
+### 功能范围（v0.3 修订）
+
+原始三件套之外的补充功能：
+
+| 功能 | 章节 |
+|---|---|
+| Web 管理 UI（配前端通道 / 后端 agent） | §8 |
+| `/switch`：IM 会话切换 agent 进程 | §9 |
+| 可视化 dashboard（系统监控） | §10 |
 
 ## 1. 角色模型：三责分离（编排怎么长出来）
 
@@ -230,17 +240,89 @@ agenthub 启动后向 `bots.registry.upsert` 广播自述（A2A Agent Card 的�
 5. **无鉴权假设**：内网 NATS 信任域内运行；暴露公网前必须加
    NATS 账号体系 + 每会话 token
 
-## 8. 里程碑
+## 8. Web 管理 UI（admin）
+
+一个内嵌的本地 Web 控制台（M2+），单进程内置（FastAPI + 静态页，
+默认 `127.0.0.1:8399`，只绑 loopback），不用独立前端工程。
+
+### 8.1 配置管理
+
+| 页面 | 可配置项 | 落点 |
+|---|---|---|
+| **前端通道** | IM/NATS 入口映射：哪个 IM 会话/群 ↔ 哪个默认 agent、事件流是否回推 IM、权限请求是否弹 IM 卡片 | DB（sqlite）+ 热生效（不需要重启 hub） |
+| **Agent 定义** | agent 名、启动 cmd、cwd 白名单、default_model、MCP servers 注入、idle_ttl、并发上限 | DB + agent_registry 热加载（下个新会话生效，存量会话不动） |
+| **编排** | max_depth、事件限流阈值、预算上限 | DB |
+| **NATS** | url、inbox/events 主题名 | DB（改后需重启） |
+
+- 配置来源演进：v0.2 起以 **sqlite DB 为唯一事实源**，yaml 只做首次
+  引导导入（config.example.yaml → DB）；UI 改 DB，运行时读 DB
+- 配置变更写审计日志（who/when/what）
+
+### 8.2 运行操作
+
+- 会话列表：强制断开、cancel 当前 turn
+- agent 进程：手动重启、kill、查看最近 stdout/stderr 环形缓冲
+- 权限请求队列：UI 直接 allow/deny（和 IM 卡片、总线 `permission_reply` 三入口同权）
+
+### 8.3 鉴权
+
+- 默认仅 loopback + 本地登录（首次启动生成一次性 token 打印到终端）
+- 若要远程访问：走 nginx 反代 + 域名 + TLS（沿用 Gitea 的部署模式），
+  且必须启用账号密码（argon2 存储）
+
+## 9. `/switch`：IM 会话的 agent 切换
+
+IM 前端命令（Octop 侧 `/switch` 或文本指令），作用于 **IM 会话 →
+agent 进程** 的绑定关系：
+
+```
+/code 修复登录 bug            # 走当前绑定 agent（默认 claude-code）
+/switch codex                 # 当前会话改绑 codex（新建会话，历史不带走）
+/switch codex --continue      # 若 codex 有该会话的 ACP session 存档则 load
+/switch                       # 列出可用 agent（来自 list_agents）
+/status                       # 查看当前绑定 + 进程状态
+```
+
+语义细节：
+
+- 绑定关系存在 **DB：`(channel, chat_id) -> agent_name, acp_session_id`**，
+  IM 网关每次 prompt 前查表；agenthub 只存全局默认
+- 切换 = 解绑旧会话（旧 ACP 子进程按 idle_ttl 自然回收，不立即杀）
+  + 新建目标 agent 会话；`--continue` 才尝试 `session/load` 迁移历史
+  （注意：不同 agent 的会话历史格式不互通，跨 agent continue 只迁移
+  agenthub 侧保存的对话文本，tool state 不迁移——文档必须写明）
+- 权限校验：`/switch` 需要配置允许的 agent 集合（防止 IM 用户切到
+  白名单外的 agent）；企微侧按用户身份过滤
+
+## 10. 可视化 dashboard
+
+Web UI 中的只读监控页（与 §8 同进程），数据全部来自 agenthub 内存
+指标 + 环形缓冲，零外部依赖（不引 Prometheus，M3 起可选暴露
+`/metrics`）：
+
+| 面板 | 内容 |
+|---|---|
+| **拓扑总览** | 前端通道（IM/NATS）→ agenthub → 各 agent 进程的实时连线图；每条边上滚动显示最近事件类型 |
+| **Agent 进程** | 每进程：状态、CPU/内存、会话数、最近 turn、最近错误 |
+| **会话流水** | 活跃会话表：绑定关系、当前 turn 耗时、token 消耗估算、depth；点开看事件时间线（tool_start/tool_end/delta 时间轴） |
+| **吞吐与延迟** | 事件速率曲线（按类型）、prompt 端到端延迟分位数（p50/p95）、排队数 |
+| **权限与安全** | 权限请求历史（谁批的、多久）、被拒次数、depth 触顶/限流触发计数 |
+| **总线健康** | NATS 连接状态、inbox 请求速率、事件发布失败数 |
+
+实现：后端 WebSocket 推送增量 + REST 快照；前端单页静态 JS
+（无构建链，直接引 CDN 或本地 vendor 文件）。
+
+## 11. 里程碑（v0.3 修订）
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **M0** | acp_client 分帧层 + initialize/session/new/prompt 通路；接通 claude-code 跑通一次真实会话（stdio 直连测试，不进总线） | 单测 + 手工脚本输出完整 update 流 |
-| **M1** | nats_service + 事件映射 + permission 挂起/恢复 + 发现广播；e2e：NATS 客户端发 prompt → 收全事件流 → 终态回包 | pytest e2e 全绿（含 cancel、crash） |
-| **M2** | 会话恢复（session/load）、进程池、get_state 补拉、JetStream KV 注册中心接入、depth 护栏 | 杀进程重启恢复会话；递归派生被拒绝 |
-| **M3** | supervisor 形态验证：codex 作为 supervisor 派子任务给 opencode 并汇总 | 一次 IM 指令 → 多 agent 协作 → 汇总回包 |
-| **M4** | Octop 侧接 `/code` 命令走通 IM 端到端 | 企微里下指令看到流式进度 |
+| **M1** | nats_service + 事件映射 + permission 挂起/恢复 + 发现广播；sqlite 配置/绑定存储 | pytest e2e 全绿（含 cancel、crash） |
+| **M2** | 会话恢复、进程池、get_state 补拉、JetStream KV 注册中心、depth 护栏；**Web admin 基础版**（agent/通道配置页 + 会话管理） | 杀进程恢复会话；UI 改配置热生效 |
+| **M3** | supervisor 形态验证 + **dashboard 监控页**（拓扑/流水/延迟面板） | 一次 IM 指令 → 多 agent 协作 → 汇总；面板数据与实际一致 |
+| **M4** | Octop 侧 `/code` + **`/switch`/`/status`** 端到端 | 企微切换 agent 后派活、流式进度、汇总回包 |
 
-## 9. 风险与已知坑
+## 12. 风险与已知坑
 
 - ACP 官方 SDK 主要是 Rust/TS；Python 侧手写分帧（M0 决策，减依赖）
 - `claude --acp` shim 的认证：agent 自己管 API key，agenthub 不碰凭据
@@ -250,7 +332,7 @@ agenthub 启动后向 `bots.registry.upsert` 广播自述（A2A Agent Card 的�
 - supervisor 自我递归：同 agent 既当 supervisor 又当 worker 时 depth
   护栏是唯一防线，max_depth 不可配置过大
 
-## 10. 命名与发布
+## 13. 命名与发布
 
 - 仓库：`vxquant/agenthub`（Gitea 主仓；按发布流程，稳定后镜像 GitHub）
 - import/包名：`agenthub`（PyPI 的 `agenthub` 当前空闲，可用；
