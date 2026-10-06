@@ -129,14 +129,30 @@ def _safe_inbound(mgr: SessionManager, ch, m) -> None:
         except Exception as e:  # noqa: BLE001
             import logging
             logging.getLogger("agenthub").error(f"[{ch.name}:{m.chat_id}] inbound failed: {e}")
+            friendly = _friendly_agent_error(str(e))
             try:
-                mgr._emit(f"{ch.name}:{m.chat_id}", "final", {"text": f"出错了：{e}"})
+                mgr._emit(f"{ch.name}:{m.chat_id}", "final", {"text": friendly})
             except Exception:  # noqa: BLE001
                 pass
 
     # prompt may block for the whole turn; run in a worker thread so the
     # channel receive loop never stalls
     threading.Thread(target=run, name=f"inbound-{ch.name}-{m.chat_id}", daemon=True).start()
+
+
+def _friendly_agent_error(raw: str) -> str:
+    """Translate agent/ACP errors into actionable chat text (keep original in logs)."""
+    low = raw.lower()
+    if "tool call delta is missing id or name" in low:
+        return (
+            "⚠️ 模型服务这次调用出了点问题（上游返回的工具调用流不完整，多为免费模型偶发）。\n"
+            "请重发一次消息；若反复出现，发 /model 列表换一个模型再试。"
+        )
+    if "session not found" in low:
+        return "⚠️ 会话已失效（服务重启或超时）。已自动重置，请重新发送消息。"
+    if "timeout waiting for" in low:
+        return "⚠️ 任务执行超时。任务可能还在后台继续，可稍后追问；或换个更简单的问法。"
+    return f"⚠️ 出错了：{raw}"
 
 
 def _safe_event(ch, key: str, kind: str, payload: dict[str, Any]) -> None:

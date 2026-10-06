@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -27,7 +28,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .acp_client import ACPClient, ACPProcessDead
+from .acp_client import ACPClient, ACPError, ACPProcessDead
+
+log = logging.getLogger("agenthub.sessions")
 
 EventSink = Callable[[str, str, dict[str, Any]], None]  # (binding_key, kind, payload)
 
@@ -81,6 +84,20 @@ class PermissionRequest:
     options: list[dict[str, Any]] = field(default_factory=list)
     answered: threading.Event = field(default_factory=threading.Event)
     choice: str | None = None  # optionId chosen, None = timeout/deny
+
+
+def _is_transient_model_error(msg: str) -> bool:
+    """Upstream model-provider hiccups that a same-session retry usually fixes."""
+    low = msg.lower()
+    return any(s in low for s in (
+        "tool call delta is missing id or name",
+        "internal service failure",
+        "upstream error",
+        "rate limit",
+        "502",
+        "503",
+        "504",
+    ))
 
 
 def _gen_request_id() -> str:
@@ -373,6 +390,15 @@ class SessionManager:
                 with self._lock:
                     self._bindings.pop(k, None)
                 raise SessionError(f"session crashed: {e}") from e
+            except ACPError as e:
+                # Transient upstream model glitches (incomplete tool-call stream)
+                # usually succeed on an immediate retry on the same session.
+                if _is_transient_model_error(str(e)):
+                    log.warning(f"[{key}] transient model error, retrying once: {e}")
+                    self._emit(key, "status", {"text": "模型返回异常，正在重试…"})
+                    res = client.session_prompt(b.acp_session_id, blocks, timeout=timeout_s)
+                else:
+                    raise
             self._append_text(key, b.agent, b.acp_session_id, {"role": "assistant", "text": str(res.get("stopReason", ""))})
             # turn terminal: final carries the accumulated text so channels without
             # an edit API (wecom-app / weixin) can deliver the whole message

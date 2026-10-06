@@ -239,6 +239,14 @@ class WecomAibotChannel:
             self._stream_append(chat_id, str(payload.get("text", "")))
         elif kind == "status":
             self._stream_ensure(chat_id, str(payload.get("text", "")))
+        elif kind == "tool_start":
+            # show agent progress inside the stream bubble so long tool turns
+            # don't look stuck
+            tool = str(payload.get("tool") or "")
+            cur = self._stream_current(chat_id)
+            marker = f"\n🔧 {tool}" if tool and (not cur or f"🔧 {tool}" not in cur) else ""
+            if marker:
+                self._stream_append(chat_id, marker)
         elif kind == "interaction":
             # approval / choice question: close current bubble with a
             # structured render; user replies in chat (M1: text-based choice)
@@ -255,6 +263,11 @@ class WecomAibotChannel:
     def _stream_key_states(self, chat_id: str) -> dict:
         with self._stream_lock:
             return self._streams.setdefault(chat_id, {"req_id": uuid.uuid4().hex, "buf": "", "sent": False})
+
+    def _stream_current(self, chat_id: str) -> str:
+        with self._stream_lock:
+            st = self._streams.get(chat_id)
+            return st["buf"] if st else ""
 
     def _stream_ensure(self, chat_id: str, text: str) -> None:
         st = self._stream_key_states(chat_id)
