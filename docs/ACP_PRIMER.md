@@ -1,6 +1,6 @@
 # ACP 协议速查（Agent Client Protocol, Zed 系）
 
-> 供 acp-bridge 实现时对照。规范：agentclientprotocol.com
+> 供 agenthub 实现时对照。规范：agentclientprotocol.com
 > （spec 源：zed-industries/zed repo docs/src/ai/external-agents.md）
 
 ## 传输与分帧
