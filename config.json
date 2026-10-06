@@ -1,0 +1,25 @@
+{
+  "agents": {
+    "claude-code": {
+      "cmd": ["claude", "--acp"],
+      "cwd_whitelist": ["~/projects/*"],
+      "default_model": null
+    },
+    "opencode": {
+      "cmd": ["opencode"],
+      "cwd_whitelist": ["~/projects/*"]
+    }
+  },
+  "session": {
+    "idle_ttl_s": 1800,
+    "max_sessions": 8
+  },
+  "orchestration": {
+    "max_depth": 3
+  },
+  "nats": {
+    "url": "nats://127.0.0.1:4222",
+    "inbox": "bots.agenthub.in",
+    "events": "bots.agenthub.out"
+  }
+}
