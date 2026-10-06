@@ -218,11 +218,15 @@ class WecomAibotChannel:
             st["sent"] = True
 
     def _send(self, obj: dict) -> None:
+        raw = json.dumps(obj, ensure_ascii=False)
         ws = getattr(self, "_ws", None)
         if ws is None:
-            self._logger.warning("[wecom] send skipped, not connected")
+            # not connected: buffer so callers/tests can observe pending frames
+            self._outbox = getattr(self, "_outbox", [])
+            self._outbox.append(raw)
+            self._logger.warning("[wecom] send buffered, not connected")
             return
-        ws.send(json.dumps(obj, ensure_ascii=False))
+        ws.send(raw)
 
 
 class _AuthFailure(Exception):

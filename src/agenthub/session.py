@@ -109,6 +109,7 @@ class SessionManager:
         self._reaper: threading.Thread | None = None
         self._sink: EventSink | None = None
         self._prompt_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._deltas: dict[str, list[str]] = {}  # binding_key -> accumulated turn text
 
         self._db: sqlite3.Connection | None = None
         if db_path:
@@ -233,6 +234,8 @@ class SessionManager:
             for img in images or []:
                 blocks.append({"type": "image", "data": _b64(img), "mimeType": "image/png"})
             key = f"{channel}:{chat_id}"
+            with self._lock:
+                self._deltas[key] = []  # reset accumulated turn text
             self._append_text(key, b.agent, b.acp_session_id, {"role": "user", "text": text})
             self._attach_update_relay(b)
 
@@ -245,8 +248,11 @@ class SessionManager:
                     self._bindings.pop(k, None)
                 raise SessionError(f"session crashed: {e}") from e
             self._append_text(key, b.agent, b.acp_session_id, {"role": "assistant", "text": str(res.get("stopReason", ""))})
-            # turn terminal: emit final (mock + real agents that lack turn_end updates)
-            self._emit(key, "final", {"stop_reason": res.get("stopReason")})
+            # turn terminal: final carries the accumulated text so channels without
+            # an edit API (wecom-app / weixin) can deliver the whole message
+            with self._lock:
+                full_text = "".join(self._deltas.get(key, []))
+            self._emit(key, "final", {"text": full_text, "stop_reason": res.get("stopReason")})
             with self._lock:
                 b.last_active = time.time()
             return {"stop_reason": res.get("stopReason"), "session_id": b.acp_session_id, "agent": b.agent}
@@ -355,6 +361,9 @@ class SessionManager:
             ut = upd.get("sessionUpdate")
             if ut == "agent_message_chunk":
                 text = (upd.get("content") or {}).get("text", "")
+                if text:
+                    with self._lock:
+                        self._deltas.setdefault(key, []).append(text)
                 self._emit(key, "delta", {"text": text})
             elif ut == "agent_thought_chunk":
                 self._emit(key, "thinking", {"text": (upd.get("content") or {}).get("text", "")})
@@ -364,6 +373,10 @@ class SessionManager:
                 self._emit(key, "tool_end", {"tool": upd.get("title") or upd.get("toolCallId"), "payload": upd})
             elif ut == "plan":
                 self._emit(key, "plan", {"entries": upd.get("entries", [])})
+            elif ut == "turn_end":
+                with self._lock:
+                    full = "".join(self._deltas.get(key, []))
+                self._emit(key, "final", {"text": full})
 
         client = self._client_for(b.agent)
         client.register_notification_handler(handler)
