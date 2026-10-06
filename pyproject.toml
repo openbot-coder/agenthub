@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = []          # M0 零依赖：stdlib only（subprocess/json/asyncio 待定）
 
 [project.scripts]
-acp-bridge = "acp_bridge.__main__:main"
+agenthub = "agenthub.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

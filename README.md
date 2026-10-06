@@ -1,16 +1,16 @@
-# acp-bridge
+# agenthub
 
 IM/NATS ↔ 本地 ACP 桥：让总线上的编排方（Octop / botflow / 任意 worker）
 能够**发现并驱动**运行在本地机器上的 ACP 编码 agent
 （Claude Code、Codex、Gemini CLI、OpenCode …），并收回结构化事件流。
 
 ```
-IM 用户 ── Octop ── NATS bus ── acp-bridge ── stdio JSON-RPC (ACP) ── coding agent
+IM 用户 ── Octop ── NATS bus ── agenthub ── stdio JSON-RPC (ACP) ── coding agent
 ```
 
 ## 定位
 
-- **ACP agent 侧代理（client 角色）**：acp-bridge 作为 ACP client 拉起/管理
+- **ACP agent 侧代理（client 角色）**：agenthub 作为 ACP client 拉起/管理
   本地 agent 子进程，把 NATS 请求翻译成 ACP 会话。
 - **总线侧服务**：对外表现为 NATS 上的一个可发现服务（类似 A2A 的
   Agent Card 思路，但传输是 NATS）。
@@ -20,7 +20,7 @@ IM 用户 ── Octop ── NATS bus ── acp-bridge ── stdio JSON-RPC (
 ## 仓库结构
 
 ```
-acp-bridge/
+agenthub/
 ├── docs/DESIGN.md        # 设计方案（总）
 ├── docs/ACP_PRIMER.md    # ACP 协议速查（方法/生命周期/坑）
 ├── src/acp_bridge/
@@ -39,7 +39,7 @@ acp-bridge/
 
 ```bash
 uv sync
-uv run acp-bridge --config config.yaml
+uv run agenthub --config config.yaml
 ```
 
 ## 状态
