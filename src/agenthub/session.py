@@ -615,6 +615,12 @@ class SessionManager:
 
     def _load_db(self) -> None:
         assert self._db is not None
+        # Persisted bindings reference ACP session ids inside agent subprocesses
+        # that died with the previous service run. We do not resume them
+        # (loadSession handling is M2): drop them so the next message creates a
+        # fresh session instead of failing with "session not found".
+        self._db.execute("DELETE FROM bindings")
+        self._db.commit()
         for channel, chat_id, agent, sid in self._db.execute(
             "SELECT channel, chat_id, agent, acp_session_id FROM bindings"
         ):

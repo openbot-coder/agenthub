@@ -226,6 +226,15 @@ class ACPClient:
             self._resolve_response(msg)
 
     def _handle_server_request(self, msg: dict[str, Any]) -> None:
+        # Handlers may BLOCK (e.g. session/request_permission waits minutes for
+        # the user's IM reply). Run them on a worker thread: blocking here would
+        # stall the reader loop, and every pending request would time out.
+        threading.Thread(
+            target=self._run_server_request, args=(msg,), daemon=True,
+            name=f"acp-srvreq-{msg.get('method')}-{msg.get('id')}",
+        ).start()
+
+    def _run_server_request(self, msg: dict[str, Any]) -> None:
         rid = msg["id"]
         method = msg["method"]
         params = msg.get("params") or {}

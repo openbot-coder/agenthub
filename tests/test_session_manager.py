@@ -120,8 +120,9 @@ def test_sqlite_persistence_roundtrip(tmp_path):
     m.stop()  # closes clients but DB rows persist
 
     m2 = make_manager(tmp_path, db_path=db)
-    b = m2.get_binding("wecom", "chatP")
-    assert b is not None and b.agent == "mock"
+    # bindings reference ACP sessions inside dead subprocesses: NOT restored
+    # (next message starts a fresh session), but conversation records are.
+    assert m2.get_binding("wecom", "chatP") is None
     rec = m2._records["wecom:chatP"]
     assert any(e["text"] == "persist me" for e in rec.text_log)
     m2.stop()
