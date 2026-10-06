@@ -7,5 +7,5 @@ session:
   max_sessions: 8
 nats:
   url: "nats://127.0.0.1:4222"
-  inbox: "bots.acp-bridge.in"
-  events: "bots.acp-bridge.out"
+  inbox: "bots.agenthub.in"
+  events: "bots.agenthub.out"

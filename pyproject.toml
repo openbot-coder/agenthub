@@ -1,5 +1,5 @@
 [project]
-name = "acp-bridge"
+name = "agenthub"
 version = "0.1.0"
 description = "IM/NATS to local ACP (Agent Client Protocol) bridge"
 requires-python = ">=3.11"
