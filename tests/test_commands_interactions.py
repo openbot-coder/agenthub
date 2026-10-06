@@ -265,6 +265,113 @@ def test_permission_wrong_chat_rejected(mgr):
     th.join(timeout=3)
 
 
+def test_interaction_answer_consumed_by_inbound(mgr, monkeypatch):
+    """User's numbered reply during a pending permission must reach
+    permission_reply, not the agent."""
+    import agenthub.runtime as rt
+
+    events = []
+    mgr.switch("wecom", "c1", "opencode")
+    b = mgr.get_binding("wecom", "c1")
+    assert b is not None
+    mgr._attach_update_relay(b)
+    mgr.set_event_sink(lambda k, kind, p: events.append((kind, p)))
+    client = mgr._clients["opencode"]
+
+    # simulate agent asking permission (non-blocking thread like real client)
+    holder = {}
+    th = threading.Thread(target=lambda: holder.update(resp=client.req_handlers[0](
+        "session/request_permission",
+        {"sessionId": b.acp_session_id, "toolCall": {"title": "read /mnt/quant/README.md"},
+         "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                     {"optionId": "allow_always", "name": "Always allow", "kind": "allow_always"},
+                     {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}]})), daemon=True)
+    th.start()
+    time.sleep(0.2)
+
+    # inbound "2" via _safe_inbound
+    forwarded = []
+
+    def fake_prompt(*a, **k):
+        forwarded.append((a, k))
+
+    monkeypatch.setattr(mgr, "prompt", fake_prompt)
+
+    class Msg:
+        chat_id = "c1"
+        user_id = "u1"
+        text = "2"
+        images = None
+
+    class Ch:
+        name = "wecom"
+
+    rt._safe_inbound(mgr, Ch(), Msg())
+    time.sleep(0.3)
+    assert not forwarded, "answer leaked to the agent"
+    th.join(timeout=3)
+    resp = holder["resp"]
+    assert resp["outcome"]["optionId"] == "allow_always", resp
+    kinds = [k for k, _ in events]
+    assert "ack" in kinds and "status" in kinds
+
+
+def test_interaction_answer_not_matching_prompts_hint(mgr, monkeypatch):
+    import agenthub.runtime as rt
+
+    events = []
+    mgr.switch("wecom", "c1", "opencode")
+    b = mgr.get_binding("wecom", "c1")
+    assert b is not None
+    mgr._attach_update_relay(b)
+    mgr.set_event_sink(lambda k, kind, p: events.append((kind, p)))
+    client = mgr._clients["opencode"]
+
+    th = threading.Thread(target=lambda: client.req_handlers[0](
+        "session/request_permission",
+        {"sessionId": b.acp_session_id, "toolCall": {"title": "t"},
+         "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}]}), daemon=True)
+    th.start()
+    time.sleep(0.2)
+
+    class Msg:
+        chat_id = "c1"
+        user_id = "u1"
+        text = "好了吗"
+        images = None
+
+    class Ch:
+        name = "wecom"
+
+    rt._safe_inbound(mgr, Ch(), Msg())
+    time.sleep(0.3)
+    finals = [p for k, p in events if k == "final"]
+    assert finals and "待选择" in finals[0]["text"]
+    # cleanup: deny the pending one
+    mgr.take_interaction_answer("wecom", "c1", "r")
+    th.join(timeout=3)
+
+
+def test_no_pending_answer_goes_to_agent(mgr, monkeypatch):
+    import agenthub.runtime as rt
+
+    forwarded = []
+    monkeypatch.setattr(mgr, "prompt", lambda *a, **k: forwarded.append(1))
+
+    class Msg:
+        chat_id = "cz"
+        user_id = "u"
+        text = "2"
+        images = None
+
+    class Ch:
+        name = "wecom"
+
+    rt._safe_inbound(mgr, Ch(), Msg())
+    time.sleep(0.3)
+    assert forwarded, "normal prompt should reach agent when nothing pending"
+
+
 def test_permission_timeout_denies(mgr, monkeypatch):
     mgr.permission_timeout_s = 0.3
     mgr.switch("wecom", "c1", "opencode")

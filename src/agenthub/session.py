@@ -78,6 +78,7 @@ class PermissionRequest:
     tool_title: str
     tool_kind: str
     raw_request_id: Any
+    options: list[dict[str, Any]] = field(default_factory=list)
     answered: threading.Event = field(default_factory=threading.Event)
     choice: str | None = None  # optionId chosen, None = timeout/deny
 
@@ -383,6 +384,58 @@ class SessionManager:
             return {"stop_reason": res.get("stopReason"), "session_id": b.acp_session_id, "agent": b.agent}
 
     # -- permission ---------------------------------------------------------------
+    def pending_interaction(self, channel: str, chat_id: str) -> dict[str, Any] | None:
+        """The most recent pending interaction for this chat, if any."""
+        key = f"{channel}:{chat_id}"
+        with self._lock:
+            pendings = [p for p in self._pending_permissions.values() if p.key == key]
+        if not pendings:
+            return None
+        pr = pendings[-1]  # newest
+        return {
+            "request_id": pr.request_id,
+            "tool": pr.tool_title,
+            "kind": pr.tool_kind,
+            "options": pr.options,
+        }
+
+    def take_interaction_answer(self, channel: str, chat_id: str, text: str) -> str:
+        """If this chat has a pending interaction and text looks like an answer
+        (number, option name, allow/deny, r), consume it and answer the agent.
+
+        Returns "consumed" | "no_pending" | "not_an_answer".
+        """
+        inter = self.pending_interaction(channel, chat_id)
+        if inter is None:
+            return "no_pending"
+        stripped = (text or "").strip()
+        if not stripped:
+            return "not_an_answer"
+        opts = inter["options"]
+        lower = stripped.lower()
+        # reject shorthand
+        if lower in ("r", "reject", "拒绝", "no", "n", "否"):
+            self.permission_reply(channel, chat_id, inter["request_id"], "reject_once")
+            return "consumed"
+        # numbered choice
+        choice: str | None = None
+        if stripped.isdigit():
+            idx = int(stripped) - 1
+            if 0 <= idx < len(opts):
+                choice = str(opts[idx]["option_id"])
+        else:
+            # option name or id, case-insensitive
+            for o in opts:
+                name = str(o.get("name", "")).lower()
+                oid = str(o.get("option_id", "")).lower()
+                if lower in (name, oid) or lower in name:
+                    choice = str(o["option_id"])
+                    break
+        if choice is None:
+            return "not_an_answer"
+        self.permission_reply(channel, chat_id, inter["request_id"], choice)
+        return "consumed"
+
     def permission_reply(self, channel: str, chat_id: str, request_id: str, choice: str) -> None:
         """Answer a pending permission/interaction.
 
@@ -528,6 +581,10 @@ class SessionManager:
                         tool_title=tool.get("title", tool.get("toolCallId", "")),
                         tool_kind=tool.get("kind", ""),
                         raw_request_id=None,
+                        options=[
+                            {"option_id": o.get("optionId"), "name": o.get("name"), "kind": o.get("kind")}
+                            for o in options
+                        ],
                     )
                 self._emit(key, "interaction", {
                     "interaction_type": "permission",

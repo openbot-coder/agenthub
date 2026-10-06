@@ -100,7 +100,25 @@ def _safe_inbound(mgr: SessionManager, ch, m) -> None:
                 "channel": ch.name, "chat_id": m.chat_id,
                 "user_id": m.user_id, "text_len": len(m.text or ""),
             })
-            # 2) commands
+            # 2) pending interaction answer (approval / question): the numbered
+            # or named reply routes to permission_reply, NOT to the agent.
+            ans = mgr.take_interaction_answer(ch.name, m.chat_id, m.text or "")
+            if ans == "consumed":
+                mgr._emit(f"{ch.name}:{m.chat_id}", "status", {"text": "已收到你的选择，继续处理…"})
+                return
+            if ans == "not_an_answer":
+                # pending interaction exists but text matches no option: prompt
+                # the user instead of silently forwarding to the agent
+                inter = mgr.pending_interaction(ch.name, m.chat_id) or {}
+                hint = "、".join(
+                    f"{i+1}. {o.get('name', o.get('option_id'))}"
+                    for i, o in enumerate(inter.get("options", []))
+                )
+                mgr._emit(f"{ch.name}:{m.chat_id}", "final", {
+                    "text": f"当前有待选择的请求（{inter.get('tool', '')}），请回复：{hint}，或 r 拒绝。"
+                })
+                return
+            # 3) commands
             if (m.text or "").strip().startswith("/"):
                 res = mgr.handle_command(ch.name, m.chat_id, m.text)
                 if res is not None:
