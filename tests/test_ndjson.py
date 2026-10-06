@@ -16,8 +16,9 @@ def test_ndjson_roundtrip():
 
 def test_ndjson_partial_tail():
     a = {"id": 1}
-    b = {"id": 2}
-    buf = encode_ndjson(a) + encode_ndjson(b)[:10]  # b is incomplete
+    b = {"id": 2, "payload": "x" * 50}
+    b_full = encode_ndjson(b)
+    buf = encode_ndjson(a) + b_full[:-1]  # b truncated before its newline
     msgs, consumed = decode_ndjson_lines(buf)
     assert msgs == [a]
     assert consumed == len(encode_ndjson(a))
