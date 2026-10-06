@@ -1,7 +1,6 @@
-"""CLI 入口（M0: 仅骨架）。"""
+"""CLI 入口：转发到 runtime.main（真正实现在 runtime.py）。"""
 
-def main() -> None:
-    raise SystemExit("agenthub: implementation pending (see docs/DESIGN.md milestones)")
+from .runtime import main
 
 if __name__ == "__main__":
     main()
