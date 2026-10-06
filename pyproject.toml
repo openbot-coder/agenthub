@@ -1,9 +1,33 @@
 [project]
 name = "agenthub"
 version = "0.1.0"
-description = "IM/NATS to local ACP (Agent Client Protocol) bridge"
+description = "IM/NATS to local ACP (Agent Client Protocol) bridge - drive Claude Code, Codex, Gemini CLI, OpenCode from messaging front-ends"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "OpenBot", email = "openbot@vxquant.com" }]
 requires-python = ">=3.11"
-dependencies = []          # M0 零依赖：stdlib only（subprocess/json/asyncio 待定）
+keywords = ["acp", "agent", "claude", "codex", "nats", "wecom", "wechat", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+# future: nats channel needs a NATS client (M1 lands nats_service.py)
+nats = ["nats-py>=2"]
+
+[project.urls]
+Homepage = "https://gitea.vxquant.com/vxquant/agenthub"
+Documentation = "https://gitea.vxquant.com/vxquant/agenthub/src/branch/main/docs/DESIGN.md"
 
 [project.scripts]
 agenthub = "agenthub.__main__:main"
@@ -11,6 +35,15 @@ agenthub = "agenthub.__main__:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agenthub"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pyright>=1.1.390",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
