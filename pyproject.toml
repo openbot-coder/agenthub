@@ -1,0 +1,16 @@
+[project]
+name = "acp-bridge"
+version = "0.1.0"
+description = "IM/NATS to local ACP (Agent Client Protocol) bridge"
+requires-python = ">=3.11"
+dependencies = []          # M0 零依赖：stdlib only（subprocess/json/asyncio 待定）
+
+[project.scripts]
+acp-bridge = "acp_bridge.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

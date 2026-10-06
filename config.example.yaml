@@ -1,0 +1,11 @@
+agents:
+  claude-code:
+    cmd: ["claude", "--acp"]
+    cwd_whitelist: ["~/projects/*"]
+session:
+  idle_ttl_s: 1800
+  max_sessions: 8
+nats:
+  url: "nats://127.0.0.1:4222"
+  inbox: "bots.acp-bridge.in"
+  events: "bots.acp-bridge.out"
