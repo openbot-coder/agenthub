@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import threading
+import threading
 from typing import Any
 
 from .channels.wecom import WecomAibotChannel
@@ -65,7 +66,7 @@ def build_channels(cfg: dict[str, Any], mgr: SessionManager) -> list:
     def sink_and_inbound(ch):
         # hub events -> channel outbound; channel inbound -> hub prompt
         ch.on_message(
-            lambda m: _safe_prompt(mgr, ch.name, m.chat_id, m.text, m.images)
+            lambda m: _safe_inbound(mgr, ch, m)
         )
         mgr.set_event_sink(
             lambda key, kind, payload: _safe_event(ch, key, kind, payload)
@@ -86,21 +87,38 @@ def build_channels(cfg: dict[str, Any], mgr: SessionManager) -> list:
     return channels
 
 
-def _safe_prompt(mgr: SessionManager, channel: str, chat_id: str, text: str, images=None) -> None:
+def _safe_inbound(mgr: SessionManager, ch, m) -> None:
+    """One inbound IM message: ack -> command dispatch OR agent prompt.
+
+    ack = an immediate 'received' event so the upstream IM can react per its
+    own conventions (WeCom: first stream frame '处理中…'; NATS: ack frame).
+    """
     def run():
         try:
-            mgr.prompt(channel, chat_id, text, images=images)
+            # 1) immediate ack: status event -> channel may show typing/receipt
+            mgr._emit(f"{ch.name}:{m.chat_id}", "ack", {
+                "channel": ch.name, "chat_id": m.chat_id,
+                "user_id": m.user_id, "text_len": len(m.text or ""),
+            })
+            # 2) commands
+            if (m.text or "").strip().startswith("/"):
+                res = mgr.handle_command(ch.name, m.chat_id, m.text)
+                if res is not None:
+                    _safe_event(ch, f"{ch.name}:{m.chat_id}", "command_result", res)
+                    return
+            # 3) normal prompt
+            mgr.prompt(ch.name, m.chat_id, m.text, images=m.images)
         except Exception as e:  # noqa: BLE001
-            log.error(f"[{channel}:{chat_id}] prompt failed: {e}")
-            # surface the failure into the chat via the sink path (best effort)
+            import logging
+            logging.getLogger("agenthub").error(f"[{ch.name}:{m.chat_id}] inbound failed: {e}")
             try:
-                mgr._emit(f"{channel}:{chat_id}", "final", {"text": f"出错了：{e}"})
+                mgr._emit(f"{ch.name}:{m.chat_id}", "final", {"text": f"出错了：{e}"})
             except Exception:  # noqa: BLE001
                 pass
 
-    # prompt blocks for the whole turn; run in worker thread so the channel
-    # receive loop never stalls
-    threading.Thread(target=run, name=f"prompt-{channel}-{chat_id}", daemon=True).start()
+    # prompt may block for the whole turn; run in a worker thread so the
+    # channel receive loop never stalls
+    threading.Thread(target=run, name=f"inbound-{ch.name}-{m.chat_id}", daemon=True).start()
 
 
 def _safe_event(ch, key: str, kind: str, payload: dict[str, Any]) -> None:

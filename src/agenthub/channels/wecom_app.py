@@ -35,7 +35,7 @@ import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text
+from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text, _interaction_text, _command_result_text
 
 QYAPI = "https://qyapi.weixin.qq.com"
 
@@ -273,8 +273,10 @@ class WecomAppChannel:
             self.reply(chat_id, str(payload.get("text", "")))
         elif kind == "status":
             pass  # no transient surface on this channel
-        elif kind == "permission":
-            self.reply(chat_id, _permission_text(payload))
+        elif kind in ("interaction", "permission"):
+            self.reply(chat_id, _interaction_text(payload))
+        elif kind == "command_result":
+            self.reply(chat_id, _command_result_text(payload))
 
     # -- helpers -----------------------------------------------------------
     def _api(self, path: str, payload: dict) -> dict:

@@ -28,7 +28,7 @@ import time
 import uuid
 from typing import Any, Callable
 
-from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text
+from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text, _interaction_text, _command_result_text
 
 class WecomAibotChannel:
     name = "wecom"
@@ -231,15 +231,24 @@ class WecomAibotChannel:
             )
 
     def push_event(self, chat_id: str, kind: str, payload: dict[str, Any]) -> None:
-        if kind == "delta":
+        if kind == "ack":
+            # upstream received the message: open the stream bubble immediately
+            # (satisfies low-latency feedback; WeCom has no separate receipt)
+            self._stream_ensure(chat_id, "正在处理…")
+        elif kind == "delta":
             self._stream_append(chat_id, str(payload.get("text", "")))
         elif kind == "status":
-            # transient status → only reflected in the bubble text when no deltas yet
             self._stream_ensure(chat_id, str(payload.get("text", "")))
+        elif kind == "interaction":
+            # approval / choice question: close current bubble with a
+            # structured render; user replies in chat (M1: text-based choice)
+            self._stream_close(chat_id, _interaction_text(payload))
+        elif kind == "command_result":
+            self.reply(chat_id, _command_result_text(payload))
         elif kind == "final":
             self._stream_close(chat_id, str(payload.get("text", "")))
         elif kind == "permission":
-            self.reply(chat_id, _permission_text(payload))
+            self.reply(chat_id, _interaction_text(payload))
         # "replace" treated as delta reset for now
 
     # -- streaming state ---------------------------------------------------
@@ -302,13 +311,6 @@ class _AuthFailure(Exception):
     pass
 
 
-def _permission_text(payload: dict[str, Any]) -> str:
-    title = payload.get("title") or payload.get("tool", "operation")
-    return (
-        f"⚠️ 权限请求：{title}\n"
-        f"回复「允许」执行；其他回复视为拒绝。\n"
-        f"请求 ID：{payload.get('request_id', '')}"
-    )
 
 
 def _default_logger():

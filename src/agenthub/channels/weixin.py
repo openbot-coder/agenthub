@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
-from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text
+from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text, _interaction_text, _command_result_text
 
 DEFAULT_BASE = "https://ilinkai.weixin.qq.com/"
 DEFAULT_POLL_TIMEOUT_MS = 35_000
@@ -168,8 +168,10 @@ class WeixinChannel:
         # No edit API: deltas coalesce away, only final text is delivered.
         if kind == "final":
             self.reply(chat_id, str(payload.get("text", "")))
-        elif kind == "permission":
-            self.reply(chat_id, _permission_text(payload))
+        elif kind in ("interaction", "permission"):
+            self.reply(chat_id, _interaction_text(payload))
+        elif kind == "command_result":
+            self.reply(chat_id, _command_result_text(payload))
 
     # -- transport defaults ------------------------------------------------
     def _default_post(self, endpoint: str, body: dict, token: str | None, timeout_ms: int) -> dict:
