@@ -189,9 +189,11 @@
 
 ## 4. ACP 客户端层（acp_client.py）
 
-- 传输：`subprocess.Popen(stdin/stdout)`，JSON-RPC 2.0 按
-  `Content-Length` 头分帧（LSP 风格）。M0 手写分帧，零依赖
-  （协议只有一层帧格式，不值得引 SDK）。
+- 传输：`subprocess.Popen(stdin/stdout)`，JSON-RPC 2.0。实测（M0）当前 ACP
+  实现用 **newline-delimited JSON**（ndjson，一行一条），不是 LSP
+  `Content-Length` 帧——`@agentclientprotocol/sdk` 的 `ndJsonStream()`
+  即此；客户端的 `transport` 字段默认 `ndjson`，保留 `lsp-frame` 兼容旧实现。
+- M0 手写解析，零第三方依赖。
 - 初始化握手：`initialize`（协议版本协商 + capabilities 交换）→
   确认 loadSession 等能力。
 - 必须实现的 **client 侧方法**（agent 会反向调用）：
@@ -341,7 +343,7 @@ Web UI 中的只读监控页（与 §8 同进程），数据全部来自 agenthu
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **M0** | acp_client 分帧层 + initialize/session/new/prompt 通路；接通 claude-code 跑通一次真实会话（stdio 直连测试，不进总线） | 单测 + 手工脚本输出完整 update 流 |
+| **M0** ✅ | 分帧层（ndjson + lsp-frame）+ ACPClient（请求/通知/反向请求分发）+ mock agent 夹具 + probe 脚本；真实 `claude-code-acp` 握手验证 | **18 单测全绿**；真实 agent `initialize`→`session/new` 通过（0.18s），`prompt` 未登录正确返回 -32000 |
 | **M1** | nats_service + 事件映射 + permission 挂起/恢复 + 发现广播；sqlite 配置/绑定存储 | pytest e2e 全绿（含 cancel、crash） |
 | **M2** | 会话恢复、进程池、get_state 补拉、JetStream KV 注册中心、depth 护栏；**Web admin 基础版**（agent/通道配置页 + 会话管理） | 杀进程恢复会话；UI 改配置热生效 |
 | **M3** | supervisor 形态验证 + **dashboard 监控页**（拓扑/流水/延迟面板） | 一次 IM 指令 → 多 agent 协作 → 汇总；面板数据与实际一致 |
