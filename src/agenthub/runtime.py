@@ -73,7 +73,12 @@ def build_channels(cfg: dict[str, Any], mgr: SessionManager) -> list:
         channels.append(ch)
 
     if "wecom" in ccfg:
-        sink_and_inbound(WecomAibotChannel(ccfg["wecom"]))
+        from .channels.wecom_ws import make_ws_factory
+
+        wcfg = ccfg["wecom"]
+        # real long-connection transport unless the config says otherwise
+        ws_factory = None if wcfg.get("mock_transport") else make_ws_factory()
+        sink_and_inbound(WecomAibotChannel(wcfg, ws_factory=ws_factory))
     if "wecom-app" in ccfg:
         sink_and_inbound(WecomAppChannel(ccfg["wecom-app"]))
     if "weixin" in ccfg:
