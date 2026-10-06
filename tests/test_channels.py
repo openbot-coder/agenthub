@@ -72,32 +72,34 @@ def test_wecom_dispatch_text_and_permission():
     ch, ws = _make_wecom()
     got = []
     ch.on_message(got.append)
-    ws.incoming.append(
-        json.dumps({"frame_id": "f1", "body": {"msgtype": "text", "from": {"userid": "u1"}, "chatid": "c1", "text": {"content": "hello\u200b"}}})
-    )
-    ch._dispatch(json.loads(ws.incoming[0]), ws)
+    frame = {"cmd": "aibot_msg_callback", "headers": {"req_id": "r1"},
+             "body": {"msgid": "m1", "chatid": "c1", "chattype": "single", "msgtype": "text",
+                      "from": {"userid": "u1"}, "text": {"content": "hello\u200b"}}}
+    ch._dispatch(frame, ws)
     assert len(got) == 1 and got[0].text == "hello" and got[0].chat_id == "c1"
+    assert ch._req_ids["c1"] == "r1"  # captured for the streaming reply
 
 
 def test_wecom_allowed_users_drops_others():
     ch, ws = _make_wecom()
     got = []
     ch.on_message(got.append)
-    ch._dispatch({"frame_id": "f2", "body": {"msgtype": "text", "from": {"userid": "u2"}, "chatid": "c", "text": {"content": "x"}}}, ws)
+    ch._dispatch({"cmd": "aibot_msg_callback", "headers": {"req_id": "r2"}, "body": {"msgtype": "text", "from": {"userid": "u2"}, "chatid": "c", "text": {"content": "x"}}}, ws)
     assert got == []
 
 
 def test_wecom_streaming_delta_coalesce_and_final():
     ch, ws = _make_wecom()
     ch._ws = ws  # pretend connected (stream sends go through the socket)
+    ch._req_ids["c1"] = "req-9"  # as set by an inbound callback
     ch.push_event("c1", "delta", {"text": "hello "})
     ch.push_event("c1", "delta", {"text": "world"})
-    # force-time independent: final flushes buffer
     ch.push_event("c1", "final", {"text": "hello world"})
-    replies = [m for m in ws.sent if m["type"] == "reply_stream"]
-    assert replies and replies[-1]["finished"] is True
-    assert replies[-1]["content"] == "hello world"
-    assert len({m["req_id"] for m in replies}) == 1  # same bubble
+    replies = [m for m in ws.sent if m["cmd"] == "aibot_respond_msg"]
+    assert replies and replies[-1]["body"]["stream"]["finish"] is True
+    assert replies[-1]["body"]["stream"]["content"] == "hello world"
+    assert replies[-1]["headers"]["req_id"] == "req-9"  # must reuse callback req_id
+    assert len({m["body"]["stream"]["id"] for m in replies}) == 1  # same bubble
 
 
 # ---------------------------------------------------------------------------

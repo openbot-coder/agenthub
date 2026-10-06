@@ -69,7 +69,7 @@ def test_e2e_wecom_aibot_text_loop():
     hub.set_event_sink(lambda key, kind, payload: ch.push_event(key.split(":", 1)[1], kind, payload))
     # inbound frame from user u1 in chat c1
     ch._dispatch(
-        {"frame_id": "f1", "body": {"msgtype": "text", "from": {"userid": "u1"}, "chatid": "c1", "text": {"content": "帮我看看登录 bug"}}},
+        {"cmd": "aibot_msg_callback", "headers": {"req_id": "req-1"}, "body": {"msgid": "m1", "chatid": "c1", "chattype": "single", "msgtype": "text", "from": {"userid": "u1"}, "text": {"content": "帮我看看登录 bug"}}},
         ws,
     )
     # wait for the turn to finish and events to flow
@@ -77,26 +77,29 @@ def test_e2e_wecom_aibot_text_loop():
     deadline = time.time() + 10
     while time.time() < deadline:
         frames = ws.sent + getattr(ch, "_outbox", [])
-        if any('"finished": true' in s for s in frames):
+        if any('"finish": true' in s for s in frames):
             break
         time.sleep(0.05)
-    assert any('"finished": true' in s for s in frames), f"no final frame; frames={frames}"
+    assert any('"finish": true' in s for s in frames), f"no final frame; frames={frames}"
     assert any("chunk" in s for s in frames), f"no delta frames; frames={frames}"
+    assert any("aibot_respond_msg" in s for s in frames)
     b = hub.get_binding("wecom", "c1")
     assert b is not None and b.agent == "mock"
     hub.stop()
 
 
 def test_e2e_wecom_aibot_image_inbound():
-    import base64
     hub = make_hub()
     ws = MockWS()
     ch = WecomAibotChannel({"bot_id": "b", "secret": "s"}, ws_factory=lambda cfg: ws)
     got = queue.Queue()
     ch.on_message(got.put)
-    png = base64.b64encode(b"\x89PNG fake").decode()
+    # aibot image frames carry {url, aeskey}; stub the fetch+decrypt (real path needs 微信 CDN)
+    ch._download_aibot_image = lambda img: b"\x89PNG fake" if img.get("url") else None
     ch._dispatch(
-        {"frame_id": "f2", "body": {"msgtype": "image", "from": {"userid": "u1"}, "chatid": "c1", "image": {"base64": png}}},
+        {"cmd": "aibot_msg_callback", "headers": {"req_id": "r3"},
+         "body": {"msgid": "m2", "chatid": "c1", "chattype": "single", "msgtype": "image",
+                  "from": {"userid": "u1"}, "image": {"url": "https://cdn/x.png", "aeskey": "k"}}},
         ws,
     )
     m = got.get(timeout=5)

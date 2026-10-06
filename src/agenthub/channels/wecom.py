@@ -30,11 +30,6 @@ from typing import Any, Callable
 
 from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text
 
-# aibot protocol message types (subset used here)
-MT_REPLY_STREAM = "reply_stream"
-MT_SEND_MESSAGE = "send_message"
-
-
 class WecomAibotChannel:
     name = "wecom"
 
@@ -58,8 +53,9 @@ class WecomAibotChannel:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._ws = None  # current socket (set by _connect_and_serve)
-        # frame -> stream state for streaming replies
+        # chat -> streaming state; chat -> last callback req_id (respond must reuse it)
         self._streams: dict[str, dict] = {}
+        self._req_ids: dict[str, str] = {}
         self._stream_lock = threading.Lock()
 
     # -- IMChannel ---------------------------------------------------------
@@ -125,46 +121,114 @@ class WecomAibotChannel:
 
     # -- inbound -----------------------------------------------------------
     def _dispatch(self, msg: dict[str, Any], ws: Any) -> None:
-        # aibot frames carry a callback payload; adapt per real protocol fields
-        frame_id = msg.get("frame_id") or msg.get("msgid") or uuid.uuid4().hex
+        """Official aibot long-connection frames:
+        {cmd: aibot_msg_callback, headers:{req_id}, body:{msgid, aibotid, chatid,
+         chattype, from:{userid}, msgtype, text:{content}, image:{url,aeskey}, ...}}
+        {cmd: aibot_event_callback, body:{event:{eventtype}, from, chatid, ...}}
+        {headers:{req_id}, errcode, errmsg}  (subscribe/heartbeat responses)
+        """
+        cmd = msg.get("cmd", "")
+        if msg.get("errcode") is not None and not cmd:
+            return  # ack/pong frame
+        req_id = (msg.get("headers") or {}).get("req_id", "")
         body = msg.get("body") or msg
+        msgtype = body.get("msgtype", "text")
+
+        if cmd == "aibot_event_callback" or msgtype == "event":
+            event = (body.get("event") or {}).get("eventtype", "")
+            if event == "enter_chat":
+                self._respond_welcome(ws, req_id)
+            return
+
         sender = (body.get("from") or {}).get("userid") or body.get("sender") or ""
-        chat_id = body.get("chatid") or body.get("chat_id") or sender
+        chat_id = str(body.get("chatid") or body.get("chat_id") or sender)
         if self.allowed_users and sender and sender not in self.allowed_users:
             self._logger.warning(f"[wecom] user {sender} not allowed, dropped")
             return
         text = ""
         images: list[bytes] = []
-        msgtype = body.get("msgtype", "text")
         if msgtype == "text":
             text = (body.get("text") or {}).get("content", "")
         elif msgtype == "image":
-            b64 = (body.get("image") or {}).get("base64", "")
-            if b64:
-                import base64
-
-                images.append(base64.b64decode(b64))
-        elif msgtype == "markdown":
-            text = (body.get("markdown") or {}).get("content", "")
+            data = self._download_aibot_image(body.get("image") or {})
+            if data:
+                images.append(data)
+        elif msgtype == "mixed":
+            for item in body.get("mixed", {}).get("content", []):
+                if item.get("msgtype") == "text":
+                    text += (item.get("text") or {}).get("content", "")
+                elif item.get("msgtype") == "image":
+                    data = self._download_aibot_image(item.get("image") or {})
+                    if data:
+                        images.append(data)
+        elif msgtype == "voice":
+            text = (body.get("voice") or {}).get("content", "")  # already transcribed
+        # remember req_id for streaming replies keyed by chat
+        if req_id:
+            with self._stream_lock:
+                self._req_ids[chat_id] = req_id
         text = clean_control_chars(text, max_len=100000).strip() if text else ""
+        # group chat: only respond when @mentioned is handled by WeCom itself
         if not text and not images:
             return
         if self._msg_cb:
             self._msg_cb(
                 InboundMessage(
                     channel=self.name,
-                    chat_id=str(chat_id),
+                    chat_id=chat_id,
                     user_id=str(sender),
                     text=text,
                     images=images,
-                    raw={"frame_id": frame_id, "msg": msg},
+                    raw={"req_id": req_id, "msgid": body.get("msgid"), "chattype": body.get("chattype"), "msg": msg},
                 )
             )
 
+    def _download_aibot_image(self, img: dict[str, Any]) -> bytes | None:
+        """image {url, aeskey}: url valid 5min; AES-256-CBC, IV=aeskey[:16], PKCS7."""
+        url, aeskey = img.get("url"), img.get("aeskey")
+        if not url:
+            return None
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                data = resp.read()
+            if aeskey:
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+                key = aeskey.encode() if isinstance(aeskey, str) and len(aeskey) == 64 else bytes.fromhex(aeskey) if isinstance(aeskey, str) else aeskey
+                if len(key) == 64:  # hex string
+                    key = bytes.fromhex(aeskey)
+                dec = Cipher(algorithms.AES(key), modes.CBC(key[:16])).decryptor()
+                raw = dec.update(data) + dec.finalize()
+                pad = raw[-1]
+                if 1 <= pad <= 32:
+                    raw = raw[:-pad]
+                data = raw
+            return data
+        except Exception as e:  # noqa: BLE001
+            self._logger.warning(f"[wecom] image download failed: {e}")
+            return None
+
+    def _respond_welcome(self, ws: Any, req_id: str) -> None:
+        self._send(
+            {
+                "cmd": "aibot_respond_welcome_msg",
+                "headers": {"req_id": req_id},
+                "body": {"msgtype": "markdown", "markdown": {"content": "hi\n\u6211\u662f agenthub\uff0c\u76f4\u63a5\u53d1\u6d88\u606f\u5373\u53ef\u4e0e opencode \u5bf9\u8bdd\u3002"}},
+            }
+        )
+
     # -- outbound ----------------------------------------------------------
     def reply(self, chat_id: str, text: str) -> None:
-        for chunk in split_message_text(text, 4000):
-            self._send({"type": MT_SEND_MESSAGE, "chatid": chat_id, "msgtype": "markdown", "markdown": {"content": chunk}})
+        for chunk in split_message_text(text, 20000):  # markdown limit 20480 bytes
+            self._send(
+                {
+                    "cmd": "aibot_send_msg",
+                    "headers": {"req_id": uuid.uuid4().hex},
+                    "body": {"chatid": chat_id, "chat_type": 0, "msgtype": "markdown", "markdown": {"content": chunk}},
+                }
+            )
 
     def push_event(self, chat_id: str, kind: str, payload: dict[str, Any]) -> None:
         if kind == "delta":
@@ -205,17 +269,22 @@ class WecomAibotChannel:
             self._streams.pop(chat_id, None)
 
     def _reply_stream(self, chat_id: str, st: dict, text: str, finished: bool) -> None:
+        # official: reuse the CALLBACK's req_id in headers; stream.id identifies the bubble
+        req_id = self._req_ids.get(chat_id, "")
         self._send(
             {
-                "type": MT_REPLY_STREAM,
-                "chatid": chat_id,
-                "req_id": st["req_id"],
-                "content": text,
-                "finished": finished,
+                "cmd": "aibot_respond_msg",
+                "headers": {"req_id": req_id},
+                "body": {
+                    "msgtype": "stream",
+                    "stream": {"id": st["req_id"], "finish": finished, "content": text},
+                },
             }
         )
         if finished:
             st["sent"] = True
+            # proactive follow-ups after the stream need aibot_send_msg
+            self._req_ids.pop(chat_id, None)
 
     def _send(self, obj: dict) -> None:
         raw = json.dumps(obj, ensure_ascii=False)

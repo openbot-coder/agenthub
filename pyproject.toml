@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=42",
+    "websockets>=12",
 ]
 
 [project.optional-dependencies]
