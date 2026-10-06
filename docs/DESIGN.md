@@ -1,6 +1,6 @@
 # agenthub 设计方案
 
-> 版本：v0.4（2026-10-05）
+> 版本：v0.5（2026-10-05）
 > 目标：把本地 ACP 编码 agent 桥接到 NATS 消息总线上，形成可发现、可派活、
 > 可编排的 agent 服务网格。IM（Octop）只是前端的一种。
 
@@ -46,6 +46,7 @@
 | Web 管理 UI（配前端通道 / 后端 agent） | §8 |
 | `/switch`：IM 会话切换 agent 进程 | §9 |
 | 可视化 dashboard（系统监控） | §10 |
+| IM 通道：企微 aibot 长连接 + 微信 | §3.5 |
 
 ## 1. 角色模型：三责分离（编排怎么长出来）
 
@@ -186,6 +187,75 @@
 | turn 结束 | `turn_end` | 终态，含 stop_reason |
 
 事件带单调 `seq`（每会话独立），消费者可检测丢失并触发 `get_state` 补拉。
+
+### 3.5 IM 通道：企业微信（aibot 长连接）与微信
+
+IM 与 NATS 平级（见 §0），IM 侧首个落地是企业微信 **aibot 长连接模式**
+（agenthub 进程内直连企微，回调 URL/公网暴露都不是必需项）与微信。
+
+#### 3.5.1 通道抽象
+
+```python
+class IMChannel(Protocol):
+    def start(self) -> None: ...                 # 建立连接
+    def stop(self) -> None: ...
+    def on_message(self, cb) -> None: ...        # 收消息 -> (channel, chat_id, user, text)
+    def reply(self, chat_id, text) -> None: ...  # 同步回复（文本）
+    def push_event(self, chat_id, event) -> None: ...  # 流式事件 -> IM 侧呈现
+```
+
+- agenthub 内部所有逻辑只面对这个抽象；`channel` 字段
+  （`wecom` / `wechat` / `nats`）+ `chat_id` 唯一定位一个会话
+- 与 Octop 的关系：Octop 的 channel 机制管"机器人账号 ↔ 平台"，
+  agenthub 的 IM channel 管"用户消息 ↔ agent 会话"，两层互补；
+  也支持不走 Octop、agenthub 直连企微（aibot 模式）
+
+#### 3.5.2 企业微信 aibot（长连接）
+
+- **连接方式**：WebSocket 长连接（企微智能机器人 aibot 模式），agenthub
+  作为客户端主动连企微，无需公网回调 URL、无需内网穿透；与 Octop
+  wecom channel 的 WebSocket 韧性经验一致（心跳、指数退避重连、
+  流窗口过期重置）
+- **凭据**：bot token / secret 存 DB（Web UI 配置，[REDACTED] 原则同 Octop）
+- **消息映射**：
+
+| 企微 | agenthub |
+|---|---|
+| 文本消息（含 @机器人） | `prompt` op（chat 维度 session 绑定，§9） |
+| 图片 | content block `image`（base64）直接进 prompt |
+| 文件 | 下载到会话工作目录，文本化后入 prompt |
+| 流式事件 | 优先用企微 **stream 更新**（同 turn 内编辑同一条消息）；无 stream 能力的 bot 类型降级为「处理中… → 终态整段回复」 |
+| 权限请求 | IM 卡片：allow/deny 按钮 → `permission_reply` |
+
+- **韧性**（复用 Octop wecom 已验证的坑位经验）：
+  - 心跳 10s + 工具计时
+  - 会话流过期（约 6 分钟窗口）自动重开流继续推
+  - 首帧即时确认（防平台重试重发）
+  - 零宽字符清洗
+- **限流**：企微 API 有频控，reply 队列化 + 合并 delta（每 1-2s 聚合
+  一次发编辑，而非每 chunk 一次）
+
+#### 3.5.3 微信
+
+微信无官方个人号 bot API，分两种接入位（M 阶段只做一种，另一个留位）：
+
+| 接入位 | 形态 | 说明 |
+|---|---|---|
+| **微信客服（WeChat Customer Service）** | 官方 API，企业主体 | HTTP 回调 + API 收发；需要公网回调（nginx 暴露）；消息 48h 窗口；**优先做这个** |
+| 个人微信（协议号/hook） | 非官方，封号风险 | 不做默认支持，只留 channel 接口位 |
+
+- 微信客服 channel 复用同一 `IMChannel` 抽象：回调验签、access_token
+  刷新（2h）、被动回复 + 客服接口主动发消息
+- 流式：微信客服无消息编辑能力 → 固定降级「处理中 → 整段回复」，
+  事件流只落 dashboard 不上屏
+- 安全：回调 URL 验签（token+echostr）、白名单 IP 可选
+
+#### 3.5.4 会话与绑定
+
+- 绑定键：`(channel, chat_id) -> agent_name, acp_session_id`（§9 /switch
+  的同一张表；企微/微信/NATS 三种 channel 共用）
+- 群聊：以群为 chat_id（@机器人触发）；私聊：以用户为 chat_id
+- 多租户隔离：不同企微 bot 实例 = 不同 channel 实例，各自独立配置
 
 ## 4. ACP 客户端层（acp_client.py）
 
@@ -345,6 +415,7 @@ Web UI 中的只读监控页（与 §8 同进程），数据全部来自 agenthu
 |---|---|---|
 | **M0** ✅ | 分帧层（ndjson + lsp-frame）+ ACPClient（请求/通知/反向请求分发）+ mock agent 夹具 + probe 脚本；真实 `claude-code-acp` 握手验证 | **18 单测全绿**；真实 agent `initialize`→`session/new` 通过（0.18s），`prompt` 未登录正确返回 -32000 |
 | **M1** | nats_service + 事件映射 + permission 挂起/恢复 + 发现广播；sqlite 配置/绑定存储 | pytest e2e 全绿（含 cancel、crash） |
+| **M1.5** | IM 通道抽象 + **企微 aibot 长连接 channel**（收发/流式/韧性/限流）；微信客服 channel（整段回复降级） | 企微真机：文本/图片入 → 流式回复 → 权限卡片；断线重连 |
 | **M2** | 会话恢复、进程池、get_state 补拉、JetStream KV 注册中心、depth 护栏；**Web admin 基础版**（agent/通道配置页 + 会话管理） | 杀进程恢复会话；UI 改配置热生效 |
 | **M3** | supervisor 形态验证 + **dashboard 监控页**（拓扑/流水/延迟面板） | 一次 IM 指令 → 多 agent 协作 → 汇总；面板数据与实际一致 |
 | **M4** | Octop 侧 `/code` + **`/switch`/`/status`** 端到端 | 企微切换 agent 后派活、流式进度、汇总回包 |
