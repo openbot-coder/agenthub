@@ -31,6 +31,7 @@ log = logging.getLogger("agenthub.wecom.ws")
 
 WS_URL = "wss://openws.work.weixin.qq.com"
 HEARTBEAT_S = 30
+_EOF = object()  # queue sentinel: connection ended
 
 
 class AibotWSAdapter:
@@ -66,13 +67,21 @@ class AibotWSAdapter:
         fut.result(timeout=self.connect_timeout + 15)  # raises on auth failure
 
     def recv(self, timeout: float = 1.0) -> str | None:
+        """Return a raw frame, None on idle timeout, raise ConnectionError on EOF.
+
+        Raising (rather than returning None) on EOF is what makes the channel's
+        outer loop see an exception and run its reconnect/backoff path.
+        """
         if self._loop is None:
-            return None
+            raise ConnectionError("ws loop not running")
         fut = asyncio.run_coroutine_threadsafe(self._queue_get(timeout), self._loop)
         try:
-            return fut.result(timeout=timeout + 2)
+            item = fut.result(timeout=timeout + 2)
         except TimeoutError:
             return None
+        if item is _EOF:
+            raise ConnectionError("websocket closed by peer")
+        return item
 
     def send(self, raw: str) -> None:
         if self._loop is None or self._ws is None:
@@ -80,8 +89,13 @@ class AibotWSAdapter:
         asyncio.run_coroutine_threadsafe(self._ws.send(raw), self._loop).result(timeout=10)
 
     def close(self) -> None:
-        if self._loop is not None:
-            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop).result(timeout=10)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._shutdown(), loop).result(timeout=8)
+        except Exception:  # noqa: BLE001
+            pass  # best-effort; the reader thread will die with the process
 
     # -- asyncio side ---------------------------------------------------------
     def _run_loop(self) -> None:
@@ -94,7 +108,8 @@ class AibotWSAdapter:
         try:
             return await asyncio.wait_for(self._queue.get(), timeout=timeout)
         except asyncio.TimeoutError:
-            return None
+            return None  # idle: caller treats as "no message"
+
 
     async def _connect_and_subscribe(self) -> None:
         import websockets
@@ -139,7 +154,7 @@ class AibotWSAdapter:
         except Exception as e:  # noqa: BLE001
             log.warning("[aibot-ws] reader ended: %s", e)
         finally:
-            await self._queue.put(None)  # EOF marker -> channel recv returns None, triggers reconnect
+            await self._queue.put(_EOF)  # signals recv() to raise -> channel reconnects
 
     async def _shutdown(self) -> None:
         self._stop_ev.set()
@@ -147,11 +162,14 @@ class AibotWSAdapter:
             self._hb_task.cancel()
         if self._ws is not None:
             try:
-                await self._ws.close()
+                await asyncio.wait_for(self._ws.close(), timeout=3)
             except Exception:  # noqa: BLE001
                 pass
             self._ws = None
-        await self._queue.put(None)
+        try:
+            await asyncio.wait_for(self._queue.put(_EOF), timeout=1)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def make_ws_factory(**extra: Any) -> Callable[[dict[str, Any]], AibotWSAdapter]:
