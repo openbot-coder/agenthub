@@ -1,6 +1,6 @@
 # agenthub 设计方案
 
-> 版本：v0.3.1（2026-10-05）
+> 版本：v0.4（2026-10-05）
 > 目标：把本地 ACP 编码 agent 桥接到 NATS 消息总线上，形成可发现、可派活、
 > 可编排的 agent 服务网格。IM（Octop）只是前端的一种。
 
@@ -11,20 +11,26 @@
 - Octop/botflow：**IM 用户 ↔ Agent**，传输 NATS（`bots.*` 主题）
 - 编码 agent（Claude Code / Codex / Gemini CLI / OpenCode …）：**编辑器 ↔ Agent**，传输 ACP（stdio JSON-RPC）
 
-### 形态定位（v0.2 关键修正）
-
-agenthub **不绑定任何前端**。它的入口就是消息总线：
+### 形态定位（v0.4 关键修正）
 
 ```
-形态 B（本设计）：
-  IM(Octop) ──┐
-  总管 agent ──┼──▶ NATS ──▶ agenthub ──▶ codex / opencode / pi / gemini...
-  cron/CI  ───┘        （stdin/ACP 子进程）     （可再派生子任务，最终汇总回入口）
+   IM 通道 ──┐
+             ├──▶  agenthub  ──▶  claude acp / codex acp / opencode acp / pi acp ...
+  NATS 通道 ──┘
 ```
 
-- 对前：暴露统一的 op 接口（prompt/new_session/...），调用方是 IM 网关、
-  supervisor agent、cron，**一视同仁**
-- 对后：把 ACP agent 变成总线上的可发现服务
+**IM 与 NATS 地位完全一致，是平级的两个前端通道**：
+
+- 区别只在形态：IM 是面向人的会话通道；NATS 是面向程序的总线通道
+- **NATS 的职责仅限于"消息如何到达、结果如何回复"**（request/reply +
+  事件订阅），不承担任何业务语义
+- agenthub 对两者一视同仁：同一套 op 接口（prompt/new_session/...）、
+  同一套事件类型，只是回包通道不同
+- 两条通道可同时启用、可各自独立配置（见 §8 Web 管理 UI）
+
+- 对前：暴露统一的 op 接口，调用方是 IM、总线 client、supervisor agent、
+  cron，**一视同仁**
+- 对后：把 ACP agent 变成可发现、可派活的服务
 
 **为什么走 ACP 而不是直接 shell 调 CLI**：
 - 统一权限审批（ACP 反转文件系统所有权，客户端可审计每次 read/edit/execute）
@@ -73,38 +79,43 @@ agenthub **不绑定任何前端**。它的入口就是消息总线：
 ## 2. 总体架构
 
 ```
-                      NATS bus
-   ┌──────────┐   ┌───────────────────────────┐   ┌──────────────┐
-   │ Octop IM │──▶│ bots.agenthub.in (svc)    │◀──│ supervisor   │
-   └──────────┘   └────────────┬──────────────┘   │ agent/cron等 │
-                               │                  └──────────────┘
-                    ┌──────────▼──────────┐
-                    │      agenthub       │
-                    │  ┌───────────────┐  │
-                    │  │ nats_service  │  │  订阅/发布/发现广播
-                    │  ├───────────────┤  │
-                    │  │ session mgr   │  │  nats req <-> acp session
-                    │  ├───────────────┤  │
-                    │  │ agent pool    │  │  子进程生命周期管理
-                    │  ├───────────────┤  │
-                    │  │ acp_client    │  │  stdio JSON-RPC 分帧
-                    │  └───────────────┘  │
-                    └──────────┬──────────┘
-                    stdio/ACP  │
-        ┌──────────────┬───────┴─────┬──────────────┐
-   ┌────▼────┐    ┌────▼────┐   ┌────▼────┐   ┌─────▼────┐
-   │claude-  │    │ codex   │   │gemini   │   │ opencode │
-   │acp shim │    │ (native)│   │cli --acp│   │ (native) │
-   └─────────┘    └─────────┘   └─────────┘   └──────────┘
+   前端通道（平级，可并存）                        agenthub（单进程）                 后端 agent（ACP 子进程）
+
+ ┌──────────────────────┐                ┌────────────────────────────┐
+ │  IM 通道             │──┐             │  ┌──────────────────────┐  │
+ │  (Octop / 企微 / …)   │  │             │  │ channel adapters     │  │  IM/NATS 归一化
+ └──────────────────────┘  │             │  ├──────────────────────┤  │
+                           ├── 接入 ────▶│  │ session manager      │  │  会话 ↔ agent 绑定
+ ┌──────────────────────┐  │             │  ├──────────────────────┤  │
+ │  NATS 通道           │──┘             │  │ agent pool           │  │  子进程生命周期
+ │  (NATS client)       │                │  ├──────────────────────┤  │
+ └──────────────────────┘                │  │ acp_client           │  │  stdio JSON-RPC 分帧
+          │                              │  └──────────────────────┘  │
+          │ 消息到达 / 回复               └─────────────┬──────────────┘
+          ▼                                            │ stdio / ACP
+   ┌──────────────┐                                    │
+   │ NATS Server  │ 独立部署               ┌────────────┼────────────┬──────────────┐
+   │ (总线本体)    │                       │            │            │              │
+   └──────────────┘                  ┌────▼────┐  ┌────▼────┐  ┌────▼────┐   ┌────▼─────┐
+                                     │claude-  │  │  codex  │  │opencode │   │ pi-agent │
+                                     │code acp │  │   acp   │  │  acp    │   │   acp    │
+                                     └─────────┘  └─────────┘  └─────────┘   └──────────┘
 ```
 
 角色说明：
 
-- ACP 协议里：agenthub 是 **client**，agent 子进程是 server
-- NATS 架构里：NATS Server 是**独立部署**的总线服务；agenthub 是 **NATS client**，作为客户端接入 NATS Server；在总线语义上它以服务身份（订阅 bots.agenthub.in、发布事件）供其他 client 调用
-- agenthub 整体定位：ACP 与 NATS 两个世界之间的翻译层
+- **ACP 侧**：agenthub 是 **client**，agent 子进程是 server
+- **NATS 侧**：NATS Server 是**独立部署**的总线本体；agenthub 是
+  **NATS client**——作为客户端接入 NATS Server，负责把消息收进来、
+  把结果/事件发回去（`bots.agenthub.in` / `.out`，见 §3）
+- **IM 侧**：agenthub 通过对应的 IM channel adapter 收发消息
+  （复用 Octop 的 channel 机制）
+- agenthub 整体定位：**前端通道与 ACP agent 之间的归一化 + 会话管理层**
 
-## 3. 总线接口设计
+## 3. NATS 通道接口设计
+
+> 本节只描述 NATS 通道的报文约定；IM 通道走各自 channel adapter 的
+> 消息格式，语义与本节 op/event 一一对应。
 
 ### 3.1 主题约定（沿用 bots.* 体系）
 
@@ -116,16 +127,18 @@ agenthub **不绑定任何前端**。它的入口就是消息总线：
 
 ### 3.2 请求协议（NATS request，JSON）
 
-```jsonc
-// 派任务
-// PUB bots.agenthub.in  <reply inbox>
+`prompt` 请求字段说明：`session_id` 可选（缺省=新建会话）；`agent` 为
+`list_agents` 中的名字；`cwd` 必须在白名单内（§7）；`depth` 编排深度
+默认 0；`timeout_ms` 为客户端侧超时。
+
+```json
 {
   "v": 1,
   "op": "prompt",
-  "session_id": "s-abc123",        // 可选；缺省=新建会话
-  "agent": "claude-code",          // agent 名（见 list_agents）
-  "cwd": "/path/to/workdir",       // 必须在白名单内（§7）
-  "depth": 0,                      // 编排深度，默认 0
+  "session_id": "s-abc123",
+  "agent": "claude-code",
+  "cwd": "/path/to/workdir",
+  "depth": 0,
   "text": "把 config.py 里的超时改成 60s 并跑通测试",
   "timeout_ms": 600000
 }
@@ -134,14 +147,16 @@ agenthub **不绑定任何前端**。它的入口就是消息总线：
 响应（reply inbox）分两类：
 
 - **终态响应**（request 的直接回包）：
-  ```jsonc
+
+  ```json
   { "v": 1, "op": "prompt", "ok": true,
     "session_id": "s-abc123", "depth": 0,
     "stop_reason": "end_turn",
     "result_text": "已改完，测试 8/8 通过" }
   ```
 - **过程事件**（PUB 到 `bots.agenthub.out`，不占 request）：
-  ```jsonc
+
+  ```json
   { "v": 1, "event": "agent_message_delta", "session_id": "s-abc123",
     "seq": 42, "ts": 1728100000.123, "payload": { "text_chunk": "..." } }
   ```
@@ -228,7 +243,7 @@ agenthub **不绑定任何前端**。它的入口就是消息总线：
 
 agenthub 启动后向 `bots.registry.upsert` 广播自述（A2A Agent Card 的总线版）：
 
-```jsonc
+```json
 { "service": "agenthub", "node": "<hostname>",
   "inbox": "bots.agenthub.in",
   "agents": [ {"name": "claude-code", "modes": ["text"],
@@ -260,10 +275,9 @@ agenthub 启动后向 `bots.registry.upsert` 广播自述（A2A Agent Card 的�
 
 | 页面 | 可配置项 | 落点 |
 |---|---|---|
-| **前端通道** | IM/NATS 入口映射：哪个 IM 会话/群 ↔ 哪个默认 agent、事件流是否回推 IM、权限请求是否弹 IM 卡片 | DB（sqlite）+ 热生效（不需要重启 hub） |
+| **前端通道** | 两个平级通道各自独立配置：**IM**（哪个会话/群 ↔ 默认 agent、事件流是否回推、权限请求是否弹卡片）与 **NATS**（url、inbox/events 主题、订阅模式） | DB（sqlite）+ 热生效（IM/agent/编排项；NATS 连接项改后需重启） |
 | **Agent 定义** | agent 名、启动 cmd、cwd 白名单、default_model、MCP servers 注入、idle_ttl、并发上限 | DB + agent_registry 热加载（下个新会话生效，存量会话不动） |
 | **编排** | max_depth、事件限流阈值、预算上限 | DB |
-| **NATS** | url、inbox/events 主题名 | DB（改后需重启） |
 
 - 配置来源演进：v0.2 起以 **sqlite DB 为唯一事实源**，json 只做首次
   引导导入（config.json → DB）；UI 改 DB，运行时读 DB
@@ -323,7 +337,7 @@ Web UI 中的只读监控页（与 §8 同进程），数据全部来自 agenthu
 实现：后端 WebSocket 推送增量 + REST 快照；前端单页静态 JS
 （无构建链，直接引 CDN 或本地 vendor 文件）。
 
-## 11. 里程碑（v0.3 修订）
+## 11. 里程碑
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|

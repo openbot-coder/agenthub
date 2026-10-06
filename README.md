@@ -39,7 +39,7 @@ agenthub/
 
 ```bash
 uv sync
-uv run agenthub --config config.yaml
+uv run agenthub --config config.json
 ```
 
 ## 状态
