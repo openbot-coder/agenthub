@@ -131,6 +131,17 @@ def main(argv: list[str] | None = None) -> None:
         ch.start()
         log.info(f"channel started: {ch.name}")
 
+    # status HTTP for nginx /agents reverse proxy
+    try:
+        from .http_admin import StatusHTTP
+
+        http_cfg = cfg.get("http", {})
+        http = StatusHTTP(mgr, host=http_cfg.get("listen_host", "127.0.0.1"), port=int(http_cfg.get("port", 30990)))
+        http.start()
+        log.info(f"status http on {http.host}:{http.port}")
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"status http failed to start: {e}")
+
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
