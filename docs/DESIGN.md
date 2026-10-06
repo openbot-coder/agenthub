@@ -1,6 +1,6 @@
 # agenthub 设计方案
 
-> 版本：v0.3（2026-10-05）
+> 版本：v0.3.1（2026-10-05）
 > 目标：把本地 ACP 编码 agent 桥接到 NATS 消息总线上，形成可发现、可派活、
 > 可编排的 agent 服务网格。IM（Octop）只是前端的一种。
 
@@ -98,8 +98,11 @@ agenthub **不绑定任何前端**。它的入口就是消息总线：
    └─────────┘    └─────────┘   └─────────┘   └──────────┘
 ```
 
-角色说明：agenthub 在 ACP 协议里是 **client**；agent 子进程是 server。
-NATS 侧 agenthub 是 **server**。hub 是两种协议之间的翻译层。
+角色说明：
+
+- ACP 协议里：agenthub 是 **client**，agent 子进程是 server
+- NATS 架构里：NATS Server 是**独立部署**的总线服务；agenthub 是 **NATS client**，作为客户端接入 NATS Server；在总线语义上它以服务身份（订阅 bots.agenthub.in、发布事件）供其他 client 调用
+- agenthub 整体定位：ACP 与 NATS 两个世界之间的翻译层
 
 ## 3. 总线接口设计
 
@@ -187,26 +190,34 @@ NATS 侧 agenthub 是 **server**。hub 是两种协议之间的翻译层。
 
 ## 5. Agent 进程池（agent_registry.py）
 
-配置驱动（config.example.yaml）：
+配置驱动（config.json，JSON 格式；DB 建立前的引导配置）：
 
-```yaml
-agents:
-  claude-code:
-    cmd: ["claude", "--acp"]         # 或 npx @anthropic-ai/claude-agent-acp
-    cwd_whitelist: ["~/projects/*"]
-    default_model: null
-  opencode:
-    cmd: ["opencode"]
-    cwd_whitelist: ["~/projects/*"]
-session:
-  idle_ttl_s: 1800        # 空闲会话进程回收
-  max_sessions: 8
-orchestration:
-  max_depth: 3            # supervisor 递归上限
-nats:
-  url: "nats://127.0.0.1:4222"
-  inbox: "bots.agenthub.in"
-  events: "bots.agenthub.out"
+```json
+{
+  "agents": {
+    "claude-code": {
+      "cmd": ["claude", "--acp"],
+      "cwd_whitelist": ["~/projects/*"],
+      "default_model": null
+    },
+    "opencode": {
+      "cmd": ["opencode"],
+      "cwd_whitelist": ["~/projects/*"]
+    }
+  },
+  "session": {
+    "idle_ttl_s": 1800,
+    "max_sessions": 8
+  },
+  "orchestration": {
+    "max_depth": 3
+  },
+  "nats": {
+    "url": "nats://127.0.0.1:4222",
+    "inbox": "bots.agenthub.in",
+    "events": "bots.agenthub.out"
+  }
+}
 ```
 
 - 启动时不预拉进程；首个 new_session 拉起，idle_ttl 到期 kill。
@@ -254,8 +265,8 @@ agenthub 启动后向 `bots.registry.upsert` 广播自述（A2A Agent Card 的�
 | **编排** | max_depth、事件限流阈值、预算上限 | DB |
 | **NATS** | url、inbox/events 主题名 | DB（改后需重启） |
 
-- 配置来源演进：v0.2 起以 **sqlite DB 为唯一事实源**，yaml 只做首次
-  引导导入（config.example.yaml → DB）；UI 改 DB，运行时读 DB
+- 配置来源演进：v0.2 起以 **sqlite DB 为唯一事实源**，json 只做首次
+  引导导入（config.json → DB）；UI 改 DB，运行时读 DB
 - 配置变更写审计日志（who/when/what）
 
 ### 8.2 运行操作
