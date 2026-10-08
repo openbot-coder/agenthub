@@ -56,6 +56,12 @@ class AibotWSAdapter:
         self._subscribed = asyncio.Event()
         self._thread: threading.Thread | None = None
         self._loop_ready = threading.Event()
+        # keepalive bookkeeping: reader task + last inbound pong/frame time.
+        # The 2026-10-07 outage: reader/heartbeat died silently while the
+        # channel's recv() loop only ever saw None, so nothing reconnected for
+        # 19h. recv() must detect a dead transport and raise.
+        self._reader_task: asyncio.Task | None = None
+        self._last_inbound = time.monotonic()
 
     # -- sync API (called from channel thread) ------------------------------
     def connect(self) -> None:
@@ -72,16 +78,40 @@ class AibotWSAdapter:
         Raising (rather than returning None) on EOF is what makes the channel's
         outer loop see an exception and run its reconnect/backoff path.
         """
-        if self._loop is None:
+        if self._loop is None or self._loop.is_closed():
             raise ConnectionError("ws loop not running")
+        # Cheap liveness first: a dead reader means an empty queue forever, so
+        # detect it before paying the wait (this is the 2026-10-07 outage).
+        if not self._reader_alive():
+            raise ConnectionError("ws reader is dead; connection zombie")
         fut = asyncio.run_coroutine_threadsafe(self._queue_get(timeout), self._loop)
         try:
             item = fut.result(timeout=timeout + 2)
         except TimeoutError:
-            return None
+            item = None
+        except Exception as e:  # noqa: BLE001
+            raise ConnectionError(f"ws loop failed: {e}") from e
         if item is _EOF:
             raise ConnectionError("websocket closed by peer")
+        if item is None:
+            # idle: if nothing (not even a pong) has arrived for a long time the
+            # TCP connection is half-open -> reconnect instead of idling forever
+            self._check_stale_inbound()
         return item
+
+    def _reader_alive(self) -> bool:
+        task = self._reader_task
+        if task is None:
+            return True  # mock transports without a reader task
+        return not task.done()
+
+    def _check_stale_inbound(self) -> None:
+        """No inbound frames (including pong replies) for too long = half-open
+        TCP. Heartbeat sends ping but the pong never arrives; raise so the
+        outer loop reconnects with a fresh socket."""
+        stale_after = max(HEARTBEAT_S * 10, 300)
+        if time.monotonic() - self._last_inbound > stale_after:
+            raise ConnectionError("no inbound frames (incl. pong) for too long")
 
     def send(self, raw: str) -> None:
         if self._loop is None or self._ws is None:
@@ -133,23 +163,46 @@ class AibotWSAdapter:
         log.info("[aibot-ws] subscribed ok (bot_id=%s...)", self.bot_id[:6])
         self._subscribed.set()
         self._hb_task = asyncio.create_task(self._heartbeat())
-        asyncio.create_task(self._reader())
+        self._reader_task = asyncio.create_task(self._reader())
+        self._last_inbound = time.monotonic()
 
     async def _heartbeat(self) -> None:
+        """Ping every HEARTBEAT_S; a pong (or any inbound frame) refreshes
+        _last_inbound. Two consecutive failed pings -> close the socket so the
+        reader ends and the channel reconnects, instead of silently pinging a
+        dead TCP connection."""
+        misses = 0
         try:
             while not self._stop_ev.is_set() and self._ws is not None:
                 await asyncio.sleep(HEARTBEAT_S)
                 if self._ws is None:
                     return
-                await self._ws.send(
-                    json.dumps({"cmd": "ping", "headers": {"req_id": uuid.uuid4().hex}})
-                )
+                try:
+                    await self._ws.send(
+                        json.dumps({"cmd": "ping", "headers": {"req_id": uuid.uuid4().hex}})
+                    )
+                    if time.monotonic() - self._last_inbound < HEARTBEAT_S * 2:
+                        misses = 0
+                    else:
+                        misses += 1
+                except Exception:  # noqa: BLE001
+                    misses += 1
+                if misses >= 2:
+                    log.warning("[aibot-ws] heartbeat missed %d pongs; closing socket", misses)
+                    try:
+                        await self._ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+        except asyncio.CancelledError:
+            raise
         except Exception as e:  # noqa: BLE001
             log.warning("[aibot-ws] heartbeat stopped: %s", e)
 
     async def _reader(self) -> None:
         try:
             async for raw in self._ws:
+                self._last_inbound = time.monotonic()
                 await self._queue.put(raw if isinstance(raw, str) else raw.decode())
         except Exception as e:  # noqa: BLE001
             log.warning("[aibot-ws] reader ended: %s", e)

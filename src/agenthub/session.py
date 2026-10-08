@@ -81,9 +81,11 @@ class PermissionRequest:
     tool_title: str
     tool_kind: str
     raw_request_id: Any
+    created_at: float = field(default_factory=time.time)
     options: list[dict[str, Any]] = field(default_factory=list)
     answered: threading.Event = field(default_factory=threading.Event)
     choice: str | None = None  # optionId chosen, None = timeout/deny
+    presented: bool = False  # interaction event emitted to the front-end
 
 
 def _is_transient_model_error(msg: str) -> bool:
@@ -475,6 +477,10 @@ class SessionManager:
             raise SessionError(f"no pending permission {request_id}")
         if pr.key != f"{channel}:{chat_id}":
             raise SessionError("permission request belongs to a different chat")
+        if not pr.presented:
+            # never turn a decision on an approval the user has not seen into
+            # an accept (covers races where a stale reply beats the render)
+            raise SessionError("permission request not yet shown; try again in a moment")
         alias = {"allow": "allow_once", "y": "allow_once", "yes": "allow_once",
                  "deny": "reject_once", "n": "reject_once", "no": "reject_once"}
         pr.choice = alias.get(choice.strip().lower(), choice)
@@ -612,6 +618,10 @@ class SessionManager:
                             for o in options
                         ],
                     )
+                with self._lock:
+                    pr = self._pending_permissions.get(req_id)
+                if pr is not None:
+                    pr.presented = True
                 self._emit(key, "interaction", {
                     "interaction_type": "permission",
                     "request_id": req_id,
@@ -630,6 +640,9 @@ class SessionManager:
                 answered = pr.answered.wait(timeout=self.permission_timeout_s)
                 if not answered:
                     pr.choice = None  # timeout -> deny (first reject-style option)
+                    self._emit(key, "status", {
+                        "text": f"审批超时（{int(self.permission_timeout_s)//60} 分钟），已自动拒绝：{pr.tool_title}"
+                    })
                 chosen = pr.choice
                 with self._lock:
                     self._pending_permissions.pop(req_id, None)
@@ -667,6 +680,11 @@ class SessionManager:
         with self._lock:
             bound = {b.agent for b in self._bindings.values()}
             victims = [k for k, b in self._bindings.items() if now - b.last_active > self.idle_ttl_s]
+            # stale pending permissions: answered never came and the ACP wait
+            # already timed out; release them so they stop intercepting replies
+            for rid in [r for r, p in self._pending_permissions.items()
+                        if p.answered.is_set() is False and now - p.created_at > self.permission_timeout_s * 2]:
+                self._pending_permissions.pop(rid, None)
             remaining = {b.agent for k, b in self._bindings.items() if k not in set(victims)}
             idle_clients = [n for n in self._clients if n not in remaining]
         for k in victims:

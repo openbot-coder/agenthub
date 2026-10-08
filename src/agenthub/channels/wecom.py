@@ -43,7 +43,9 @@ class WecomAibotChannel:
         self.secret = config["secret"]
         self.domain = config.get("domain", "https://open.weixin.qq.com")
         self.connect_timeout_s = float(config.get("connect_timeout_s", 20))
-        self.max_reconnect = int(config.get("max_reconnect_attempts", 10))
+        # 0/negative = unlimited (default): network loss must never permanently
+        # kill the bot. Backoff caps at 60s, so a retry storm is bounded anyway.
+        self.max_reconnect = int(config.get("max_reconnect_attempts", 0))
         self.reply_timeout_s = float(config.get("reply_timeout_s", 600))
         self.allowed_users = set(config.get("allowed_users") or [])
         self._ws_factory = ws_factory  # returns object with send/recv/close
@@ -53,6 +55,8 @@ class WecomAibotChannel:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._ws = None  # current socket (set by _connect_and_serve)
+        self.connection_state = "idle"
+        self.connection_error: str = ""
         # chat -> streaming state; chat -> last callback req_id (respond must reuse it)
         self._streams: dict[str, dict] = {}
         self._req_ids: dict[str, str] = {}
@@ -85,12 +89,27 @@ class WecomAibotChannel:
                 return
             except Exception as e:  # noqa: BLE001
                 attempt += 1
-                if attempt > self.max_reconnect:
+                if self.max_reconnect > 0 and attempt > self.max_reconnect:
                     self._logger.error(f"[wecom] reconnect exhausted ({attempt}): {e}")
+                    self._set_channel_state("failed", str(e))
                     return
-                delay = min(2**attempt, 30)
-                self._logger.warning(f"[wecom] disconnected ({e}); retry {attempt}/{self.max_reconnect} in {delay}s")
+                delay = min(2**attempt, 60)
+                self._logger.warning(
+                    f"[wecom] disconnected ({e}); retry {attempt} in {delay}s"
+                )
+                self._set_channel_state("connecting", f"reconnecting in {delay}s: {e}")
                 self._stop.wait(delay)
+
+    def _set_channel_state(self, state: str, detail: str = "") -> None:
+        """Surface connection state so ops can see a dead connection from the
+        status endpoint instead of discovering it by missing replies."""
+        self.connection_state = state
+        self.connection_error = detail
+        try:
+            if self._sink:
+                self._sink(f"{self.name}:__channel__", "channel_state", {"state": state, "error": detail})
+        except Exception:  # noqa: BLE001
+            pass
 
     def _connect_and_serve(self) -> None:
         if self._ws_factory is None:
@@ -105,6 +124,7 @@ class WecomAibotChannel:
         )
         ws.connect()
         self._ws = ws
+        self._set_channel_state("connected")
         self._logger.info("[wecom] WebSocket authenticated")
         try:
             while not self._stop.is_set():
