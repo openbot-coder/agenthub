@@ -157,8 +157,14 @@ def _friendly_agent_error(raw: str) -> str:
 
 def _safe_event(ch, key: str, kind: str, payload: dict[str, Any]) -> None:
     try:
-        chat_id = key.split(":", 1)[1]
-        ch.push_event(chat_id, kind, payload)
+        target, chat_id = key.split(":", 1)
+        if target == ch.name and chat_id != "__channel__":
+            ch.push_event(chat_id, kind, payload)
+        # channel_state (and other chatless events) are recorded on the
+        # channel object for the /status endpoint, not pushed per-chat
+        elif kind == "channel_state":
+            ch.connection_state = payload.get("state", ch.connection_state)
+            ch.connection_error = payload.get("error", "")
     except Exception as e:  # noqa: BLE001
         log.warning(f"[{ch.name}] push_event {kind} failed: {e}")
 
@@ -189,6 +195,7 @@ def main(argv: list[str] | None = None) -> None:
 
         http_cfg = cfg.get("http", {})
         http = StatusHTTP(mgr, host=http_cfg.get("listen_host", "127.0.0.1"), port=int(http_cfg.get("port", 30990)))
+        http.channels = chans  # /status reports per-channel connection state
         http.start()
         log.info(f"status http on {http.host}:{http.port}")
     except Exception as e:  # noqa: BLE001

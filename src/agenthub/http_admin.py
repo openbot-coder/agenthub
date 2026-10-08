@@ -27,6 +27,7 @@ class StatusHTTP:
         self.host = host
         self.port = port
         self.started = time.time()
+        self.channels: list = []  # injected by runtime.main() after build_channels
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         outer = self
@@ -46,13 +47,26 @@ class StatusHTTP:
             def _route_get(self, path: str, qs: dict) -> None:
                 m = outer.mgr
                 if path in ("/", "/status"):
+                    channels = []
+                    with m._lock:
+                        # channels registered on the runtime are injected here
+                        # by main() (see set_channel_registry) so /status can
+                        # report per-channel connection state incl. wecom WS
+                        for ch in outer.channels:
+                            channels.append({
+                                "name": getattr(ch, "name", str(ch)),
+                                "state": getattr(ch, "connection_state", "unknown"),
+                                "error": getattr(ch, "connection_error", "") or None,
+                            })
+                    degraded = any(c["state"] in ("failed",) for c in channels)
                     self._json(
                         200,
                         {
                             "service": "agenthub",
-                            "status": "running",
+                            "status": "degraded" if degraded else "running",
                             "uptime_s": round(time.time() - outer.started, 1),
                             "agents": m.list_agents(),
+                            "channels": channels,
                         },
                     )
                 elif path == "/healthz":

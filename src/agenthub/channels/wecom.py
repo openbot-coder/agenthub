@@ -303,12 +303,32 @@ class WecomAibotChannel:
             st["last"] = now
             self._reply_stream(chat_id, st, st["buf"][-4000:], finished=False)
 
+    # aibot_respond_msg single-frame limit is 20480 bytes; leave headroom for
+    # the JSON envelope and stream metadata (matches the wecom-app markdown cap)
+    _STREAM_FINISH_BYTES = 19000
+
     def _stream_close(self, chat_id: str, final_text: str) -> None:
         st = self._stream_key_states(chat_id)
         text = final_text or st["buf"]
-        self._reply_stream(chat_id, st, text, finished=True)
+        # Overflow guard: the finish frame carries the FULL text and WeCom
+        # rejects frames over ~20KB. dsh-im-verified approach: first chunk
+        # closes the bubble, the remainder goes out as separate markdown
+        # messages instead of being silently dropped by the gateway.
+        chunks = split_message_text(text, self._STREAM_FINISH_BYTES)
+        if chunks:
+            self._reply_stream(chat_id, st, chunks[0], finished=True)
+            overflow = chunks[1:]
+        else:
+            self._reply_stream(chat_id, st, "", finished=True)
+            overflow = []
         with self._stream_lock:
             self._streams.pop(chat_id, None)
+        if overflow:
+            self._logger.info(
+                f"[wecom] finish frame overflow: {len(overflow)} extra chunk(s) sent as markdown"
+            )
+            for chunk in overflow:
+                self.reply(chat_id, chunk)
 
     def _reply_stream(self, chat_id: str, st: dict, text: str, finished: bool) -> None:
         # official: reuse the CALLBACK's req_id in headers; stream.id identifies the bubble
