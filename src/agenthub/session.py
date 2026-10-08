@@ -504,11 +504,33 @@ class SessionManager:
         session_id = (res or {}).get("sessionId")
         if not session_id:
             raise SessionError(f"session/new returned no sessionId: {res!r}")
-        self._update_session_config(
-            Binding(channel=k[0], chat_id=k[1], agent=agent_name, acp_session_id=session_id),
-            (res or {}).get("configOptions") or [],
-        )
+        b = Binding(channel=k[0], chat_id=k[1], agent=agent_name, acp_session_id=session_id)
+        self._update_session_config(b, (res or {}).get("configOptions") or [])
+        # Pin the agent's model when a default_model is configured. Free-tier
+        # agents rotate their built-in default (and some models' upstreams go
+        # dark), so we cannot rely on the agent's own choice.
+        if spec.default_model:
+            self._pin_default_model(client, b, spec.default_model)
         return client, session_id
+
+    def _pin_default_model(self, client: ACPClient, b: Binding, model: str) -> None:
+        """Set the configured default model on a fresh session; warn on failure."""
+        try:
+            current = self._session_config(b).get("model", {}).get("current")
+            if current == model:
+                return
+            res = client.request(
+                "session/set_config_option",
+                {"sessionId": b.acp_session_id, "configId": "model", "value": model},
+                timeout=15,
+            )
+            self._update_session_config(b, (res or {}).get("configOptions") or [])
+            self._logger.info(f"[sessions] pinned default model {model!r} for session {b.acp_session_id}")
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                f"[sessions] failed to pin default model {model!r} on session "
+                f"{b.acp_session_id}: {exc}; continuing with agent default"
+            )
 
     def _client_for(self, agent_name: str, spec: AgentSpec | None = None) -> ACPClient:
         with self._lock:
