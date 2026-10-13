@@ -191,7 +191,7 @@ async function renderOps(){
       <div class="row"><span class="k">chat_id</span><input id="bd-chat" placeholder="会话 ID" style="width:50%"></div>
       <div class="row"><span class="k">agent</span><select id="bd-ag">${(st.agents||[]).map(a=>`<option>${esc(a.name)}</option>`).join('')}</select></div>
       <div class="row"><label class="k"><input type="checkbox" id="bd-cont" checked> 保留历史（跨 agent 迁移文本）</label></div>
-      <div class="row"><button class="btn" onclick="doBind()">绑定</button></div>
+      <div class="row"><button class="btn" onclick="doBind(this)">绑定</button></div>
     </div>
     <div class="card" style="grid-column:1/-1"><h2>绑定（含历史会话）</h2>${bindTable()}</div>
     <div class="card" style="grid-column:1/-1"><h2>生效配置（secret 已脱敏）</h2>
@@ -280,11 +280,18 @@ async function delItem(kind,name){
     toast(true,`${kind} ${name} 已删除`);renderOps();
   }catch(e){toast(false,e.message)}
 }
-async function doBind(){
+async function doBind(btn){
+  opsBusy=true;
+  if(btn){btn.disabled=true;btn.textContent='绑定中…';}
+  toast(true,'正在建立 ACP 会话（可能需数秒）…');
   try{ const r=await post('api/bind',{channel:$('bd-ch').value.trim(),chat_id:$('bd-chat').value.trim(),
     agent:$('bd-ag').value,continue_history:$('bd-cont').checked});
-    toast(true,`已绑定 ${r.binding} → ${r.agent}`);load();
+    toast(true,`✓ 已绑定 ${r.binding} → ${r.agent}（会话 ${String(r.acp_session_id||'').slice(0,14)}…）`);
+    $('bd-chat').value='';
+    await load();
   }catch(e){toast(false,e.message)}
+  opsBusy=false;
+  if(btn){btn.disabled=false;btn.textContent='绑定';}
 }
 async function doUnbind(ch,chat){
   if(!confirm(`确认解绑 ${ch}:${chat}？`))return;
@@ -310,6 +317,7 @@ async function load(){
  renderTabs();renderPanes();
 }
 let opsDirty=false; // 表单填写中 -> 自动刷新只拉数据不重渲染
+let opsBusy=false;  // 写操作进行中 -> 同样跳过重渲染（按钮不能消失）
 $('panes').addEventListener('input',()=>{if(cur==='Ops')opsDirty=true});
 $('panes').addEventListener('click',e=>{if(e.target.closest('.btn'))opsDirty=false});
 async function load(){
@@ -327,7 +335,7 @@ async function load(){
   lamp.className='dot '+(st==='running'?'ok':st==='degraded'?'warn':'bad');
   $('lampTxt').textContent=st==='running'?'运行中':st==='degraded'?'降级':'不可达';
  }catch(e){DATA.status={status:'unreachable'}}
- if(cur==='Ops'){ if(!opsDirty) renderOps(); }
+ if(cur==='Ops'){ if(!opsDirty&&!opsBusy) renderOps(); }
  else { renderTabs();renderPanes(); }
 }
 $('refresh').onclick=load;setInterval(load,10000);load();
