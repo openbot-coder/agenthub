@@ -132,7 +132,10 @@ class WecomAibotChannel:
                 if raw is None:
                     continue
                 msg = json.loads(raw)
-                self._dispatch(msg, ws)
+                try:
+                    self._dispatch(msg, ws)
+                except Exception as e:  # noqa: BLE001
+                    self._logger.error(f"[wecom] dispatch failed: {e}; msg={raw[:200]}")
         finally:
             try:
                 ws.close()

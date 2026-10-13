@@ -244,6 +244,7 @@ class SessionManager:
             self._bindings[self.key(channel, chat_id)] = Binding(
                 channel=channel, chat_id=chat_id, agent=agent_name, acp_session_id=session_id
             )
+            self._persist_binding(self._bindings[self.key(channel, chat_id)])
         for entry in migrated:
             self._append_text(key, agent_name, session_id, entry)
         return {"agent": agent_name, "acp_session_id": session_id, "migrated": len(migrated)}
