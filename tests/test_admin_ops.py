@@ -1,44 +1,85 @@
-"""Tests for admin write ops (channel/agent config + binding)."""
+"""Tests for admin write ops (sqlite-backed CRUD: channel/agent/binding)."""
 
+import base64
 import json
-import threading
+import urllib.error
+import urllib.request
 from unittest.mock import MagicMock
 
 import pytest
 
-from agenthub.admin_ops import AdminWriteError, AdminWrites
+from agenthub.admin_ops import AdminStore, AdminWriteError, AdminWrites, seed_from_json
 from agenthub.http_admin import StatusHTTP
 from agenthub.session import AgentSpec
 
+BOOT = {
+    "channels": {"wecom": {"bot_id": "b1", "secret": "s1"}},
+    "agents": {"opencode": {"cmd": ["opencode", "acp"]}},
+}
 
-@pytest.fixture
-def ops(tmp_path):
-    cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({
-        "channels": {"wecom": {"bot_id": "b1", "secret": "s1"}},
-        "agents": {"opencode": {"cmd": ["opencode", "acp"]}},
-    }))
+
+def make_mgr():
     mgr = MagicMock()
     mgr.agents = {"opencode": AgentSpec(name="opencode", cmd=["opencode", "acp"])}
     mgr.switch.return_value = {"acp_session_id": "sess-1", "migrated": 3}
     mgr.get_binding.return_value = True
-    return AdminWrites(mgr, str(cfg))
+    return mgr
 
 
-# -- channel --
+@pytest.fixture
+def ops(tmp_path):
+    boot = tmp_path / "config.json"
+    boot.write_text(json.dumps(BOOT))
+    store = AdminStore(str(tmp_path / "agenthub.db"))
+    seed_from_json(store, str(boot))
+    return AdminWrites(make_mgr(), store)
 
-def test_channel_upsert_new_and_update(ops):
-    r = ops.upsert_channel("weixin", {"token": "tok123"})
-    assert r["existed"] is False and r["restart_required"]
-    r2 = ops.upsert_channel("weixin", {"token": "tok456"})
-    assert r2["existed"] is True
-    cfg = json.load(open(ops.config_path))
-    assert cfg["channels"]["weixin"]["token"] == "tok456"
+
+# -- store / seeding --
+
+def test_store_seed_once(tmp_path):
+    boot = tmp_path / "config.json"
+    boot.write_text(json.dumps(BOOT))
+    store = AdminStore(str(tmp_path / "db.sqlite"))
+    assert seed_from_json(store, str(boot)) is True
+    assert seed_from_json(store, str(boot)) is False  # second call no-op
+    assert store.load()["channels"]["wecom"]["bot_id"] == "b1"
+    store2 = AdminStore(str(tmp_path / "db2.sqlite"))
+    with pytest.raises(AdminWriteError, match="not seeded"):
+        store2.load()
+
+
+def test_store_persists_across_reopen(tmp_path):
+    boot = tmp_path / "config.json"
+    boot.write_text(json.dumps(BOOT))
+    store = AdminStore(str(tmp_path / "db.sqlite"))
+    seed_from_json(store, str(boot))
+    cfg = store.load()
+    cfg["agents"]["x"] = {"cmd": ["x"]}
+    store.save(cfg)
+    assert "x" in AdminStore(str(tmp_path / "db.sqlite")).load()["agents"]
+
+
+# -- channel CRUD --
+
+def test_channel_list_masks_secret(ops):
+    chans = ops.list_channels()
+    assert chans[0]["name"] == "wecom"
+    assert "REDACTED" in chans[0]["fields"]["secret"]
+    assert chans[0]["fields"]["bot_id"] == "b1"
+    assert "s1" not in json.dumps(chans)  # plaintext never leaks
+
+
+def test_channel_update_blank_secret_keeps_old(ops):
+    ops.upsert_channel("wecom", {"bot_id": "b2", "secret": ""})
+    doc = ops.store.load()
+    assert doc["channels"]["wecom"]["bot_id"] == "b2"
+    assert doc["channels"]["wecom"]["secret"] == "s1"  # blank -> preserved
 
 
 def test_channel_missing_required_rejected(ops):
-    with pytest.raises(AdminWriteError, match="secret"):
-        ops.upsert_channel("wecom", {"bot_id": "x"})
+    with pytest.raises(AdminWriteError, match="token"):
+        ops.upsert_channel("weixin", {})
 
 
 def test_channel_unknown_type_rejected(ops):
@@ -51,38 +92,45 @@ def test_channel_unknown_field_rejected(ops):
         ops.upsert_channel("wecom", {"bot_id": "b", "secret": "s", "foo": 1})
 
 
-def test_channel_delete(ops):
+def test_channel_delete_and_get_missing(ops):
     ops.delete_channel("wecom")
-    assert "wecom" not in json.load(open(ops.config_path))["channels"]
+    assert ops.list_channels() == []
+    with pytest.raises(AdminWriteError, match="not configured"):
+        ops.get_channel("wecom")
 
 
-# -- agent --
+# -- agent CRUD --
 
-def test_agent_upsert_hot_registers(ops):
+def test_agent_crud_full_cycle(ops):
     r = ops.upsert_agent("coder", {"cmd": "coder acp", "default_model": "m1"})
-    assert r["hot_registered"]
-    assert "coder" in ops.mgr.agents
+    assert r["existed"] is False and r["hot_registered"]
     assert ops.mgr.agents["coder"].default_model == "m1"
-    cfg = json.load(open(ops.config_path))
-    assert cfg["agents"]["coder"]["cmd"] == ["coder", "acp"]
+    assert ops.get_agent("coder")["cmd"] == "coder acp"
+    # update keeps untouched fields (merge semantics)
+    ops.upsert_agent("coder", {"cmd": "coder acp --new"})
+    a = ops.get_agent("coder")
+    assert a["cmd"] == "coder acp --new" and a["default_model"] == "m1"
+    ops.delete_agent("coder")
+    assert "coder" not in ops.mgr.agents
+    with pytest.raises(AdminWriteError, match="not configured"):
+        ops.get_agent("coder")
 
 
 def test_agent_delete_last_rejected(ops):
-    ops2_cfg = json.load(open(ops.config_path))
-    ops2_cfg["agents"] = {"solo": {"cmd": ["x"]}}
-    json.dump(ops2_cfg, open(ops.config_path, "w"))
+    doc = ops.store.load()
+    doc["agents"] = {"solo": {"cmd": ["x"]}}
+    ops.store.save(doc)
     ops.mgr.agents.clear()
     ops.mgr.agents["solo"] = AgentSpec(name="solo", cmd=["x"])
     with pytest.raises(AdminWriteError, match="last agent"):
         ops.delete_agent("solo")
 
 
-# -- bind --
+# -- binding --
 
 def test_bind_calls_switch(ops):
     r = ops.bind("wecom", "chat9", "opencode")
-    assert r["binding"] == "wecom:chat9"
-    assert r["migrated_turns"] == 3
+    assert r["binding"] == "wecom:chat9" and r["migrated_turns"] == 3
     ops.mgr.switch.assert_called_once_with("wecom", "chat9", "opencode", cont=True)
 
 
@@ -100,25 +148,22 @@ def test_unbind_missing_binding_rejected(ops):
 # -- HTTP layer --
 
 def test_http_ops_endpoints_auth_gated(tmp_path):
-    cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"agents": {"a": {"cmd": ["x"]}}, "channels": {}}))
-    mgr = MagicMock()
+    boot = tmp_path / "config.json"
+    boot.write_text(json.dumps({"agents": {"a": {"cmd": ["x"]}}, "channels": {}}))
+    store = AdminStore(str(tmp_path / "db.sqlite"))
+    seed_from_json(store, str(boot))
+    mgr = make_mgr()
     mgr.agents = {"a": AgentSpec(name="a", cmd=["x"])}
     mgr.switch.return_value = {"acp_session_id": "s", "migrated": 0}
-    mgr.get_binding.return_value = None
-    http = StatusHTTP(mgr, host="127.0.0.1", port=0, admin_cfg={"username": "u", "password": "p"})
-    from agenthub.admin_ops import AdminWrites
-    http.ops = AdminWrites(mgr, str(cfg))
+    http = StatusHTTP(mgr, host="127.0.0.1", port=0,
+                      admin_cfg={"username": "u", "password": "p"})
+    http.ops = AdminWrites(mgr, store)
     http.start()
     port = http._server.server_address[1]  # type: ignore[union-attr]
-    import base64
-    import urllib.error
-    import urllib.request
 
     def post(path, body, auth=True):
         req = urllib.request.Request(
-            f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(), method="POST"
-        )
+            f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(), method="POST")
         if auth:
             req.add_header("Authorization", "Basic " + base64.b64encode(b"u:p").decode())
         try:
@@ -127,13 +172,14 @@ def test_http_ops_endpoints_auth_gated(tmp_path):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"{}")
 
-    # no auth -> 401
     code, _ = post("/api/agent", {"name": "b", "fields": {"cmd": "y"}}, auth=False)
     assert code == 401
-    # with auth -> creates agent
     code, j = post("/api/agent", {"name": "b", "fields": {"cmd": "y"}})
     assert code == 200 and j["hot_registered"]
-    # validation error -> 400
+    code, j = post("/api/agent/get", {"name": "b"})
+    assert code == 200 and j["cmd"] == "y"
     code, j = post("/api/channel", {"name": "wecom", "fields": {"bot_id": "b"}})
     assert code == 400 and "secret" in j["error"]
+    code, j = post("/api/ops-state", {})
+    assert code == 200 and j["storage"] == "sqlite"
     http.stop()  # type: ignore[union-attr]

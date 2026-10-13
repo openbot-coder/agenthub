@@ -203,9 +203,18 @@ def main(argv: list[str] | None = None) -> None:
         http.channels = chans  # /status reports per-channel connection state
         http.effective_cfg = cfg  # /api/config (sanitized at render time)
         try:
-            from .admin_ops import AdminWrites
+            from .admin_ops import AdminStore, AdminWrites, seed_from_json
 
-            http.ops = AdminWrites(mgr, os.path.abspath(args.config))
+            # config doc lives in sqlite (same db as bindings/records);
+            # config.json is only the first-run seed
+            sess = cfg.get("session", {})
+            db_path = sess.get("db_path") or os.path.join(
+                os.path.dirname(os.path.abspath(args.config)), "agenthub.db"
+            )
+            store = AdminStore(db_path)
+            if seed_from_json(store, os.path.abspath(args.config)):
+                log.info(f"config seeded into sqlite from {args.config}")
+            http.ops = AdminWrites(mgr, store)
         except Exception as e:  # noqa: BLE001
             log.warning(f"admin writes disabled: {e}")
         http.start()

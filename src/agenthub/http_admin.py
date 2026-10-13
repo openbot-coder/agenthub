@@ -171,10 +171,14 @@ class StatusHTTP:
                             self._json(200, ops.upsert_channel(req["name"], req.get("fields", {})))
                         elif path == "/api/channel/delete":
                             self._json(200, ops.delete_channel(req["name"]))
+                        elif path == "/api/channel/get":
+                            self._json(200, ops.get_channel(req["name"]))
                         elif path == "/api/agent":
                             self._json(200, ops.upsert_agent(req["name"], req.get("fields", {})))
                         elif path == "/api/agent/delete":
                             self._json(200, ops.delete_agent(req["name"]))
+                        elif path == "/api/agent/get":
+                            self._json(200, ops.get_agent(req["name"]))
                         elif path == "/api/bind":
                             self._json(200, ops.bind(
                                 req["channel"], str(req["chat_id"]), req["agent"],
