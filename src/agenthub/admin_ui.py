@@ -13,14 +13,15 @@ DARK_CSS = """
 --mono:ui-monospace,'SF Mono','Cascadia Code',Menlo,monospace}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--fg);font-family:var(--mono);font-size:16px;padding:28px;max-width:1440px;margin:0 auto;line-height:1.5}
-h1{font-size:22px;font-weight:600;display:flex;align-items:center;gap:10px;margin-bottom:6px}
+h1{font-size:21px;font-weight:600;display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.topbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
 h1 .sub{font-size:14px;color:var(--muted);font-weight:400}
 .tabs{display:flex;gap:6px;margin-top:18px;border-bottom:1px solid var(--border)}
-.tab{padding:10px 20px;cursor:pointer;color:var(--muted);border:1px solid transparent;border-bottom:none;border-radius:6px 6px 0 0;font-size:15px}
+.tab{padding:10px 22px;cursor:pointer;color:var(--muted);border:1px solid transparent;border-bottom:2px solid transparent;border-radius:8px 8px 0 0;font-size:15px;transition:color .15s,border-color .15s}
 .tab:hover{color:var(--fg)}
-.tab.on{color:var(--fg);background:var(--panel);border-color:var(--border);position:relative;top:1px}
+.tab.on{color:var(--blue);border-bottom-color:var(--blue);font-weight:600}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:18px;margin-top:20px}
-.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:18px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
 .pill{font-size:13px;padding:3px 10px;border-radius:12px;font-weight:600}
 .pill.ok{background:#12351d;color:var(--green)}
@@ -38,8 +39,6 @@ th{color:var(--muted);text-align:left;font-weight:500;padding:8px 10px;border-bo
 td{padding:10px;border-bottom:1px solid var(--border);vertical-align:top}
 tr:last-child td{border-bottom:none}
 code{background:#21262d;padding:2px 8px;border-radius:4px;font-size:14px;color:var(--blue)}
-#refresh{color:var(--muted);font-size:13px;cursor:pointer;user-select:none;padding:4px 8px;border:1px solid var(--border);border-radius:6px}
-#refresh:hover{color:var(--blue);border-color:var(--blue)}
 .empty{color:var(--muted);font-style:italic;padding:14px 0;font-size:15px}
 .msg{padding:10px 14px;border-left:3px solid var(--border);margin:8px 0;border-radius:0 8px 8px 0;font-size:15px;white-space:pre-wrap;word-break:break-word}
 .msg.user{border-color:var(--blue);background:rgba(88,166,255,.06)}
@@ -66,8 +65,10 @@ HTML = """<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
 <title>agenthub</title><style>__CSS__</style></head>
 <body>
-<h1>⚡ agenthub <span class="sub">ACP bridge · IM ⇄ NATS ⇄ agents</span></h1>
-<div class="meta">refreshed <span id="ts">—</span> · <span id="refresh">↻ refresh</span> · auto 10s</div>
+<div class="topbar">
+  <h1><span id="lamp" class="dot ok" style="width:12px;height:12px"></span> agenthub <span class="sub">IM ⇄ NATS ⇄ agents</span></h1>
+  <div class="meta"><span id="lampTxt"></span> · refreshed <span id="ts">—</span> · <button id="refresh" class="btn sm">↻ 刷新</button> · auto 10s</div>
+</div>
 
 <div class="tabs" id="tabs"></div>
 <div id="panes"></div>
@@ -80,12 +81,12 @@ const fmtUp=s=>{if(s<60)return Math.round(s)+'s';if(s<3600)return Math.floor(s/6
 const ago=t=>Math.max(0,Math.round(Date.now()/1000-t));
 
 let DATA={};
-const TABS=['Overview','Sessions','Conversations','Approvals','Config','Ops'];
-let cur='Overview';
+const TABS=['概览','会话','对话','审批','管理'];
+let cur='概览';
 function renderTabs(){
   const pend=(DATA.approvals?.approvals||[]).filter(a=>!a.answered).length;
   $('tabs').innerHTML=TABS.map(t=>{
-    let n=t==='Approvals'&&pend?` <span class="badge" style="background:var(--red);color:#fff">${pend}</span>`:'';
+    let n=t==='审批'&&pend?` <span class="badge" style="background:var(--red);color:#fff">${pend}</span>`:'';
     return `<div class="tab ${t===cur?'on':''}" onclick="cur='${t}';renderTabs();renderPanes()">${t}${n}</div>`;
   }).join('');
 }
@@ -101,7 +102,7 @@ const bind=bs=>bs.length?`<table><tr><th>channel</th><th>chat</th><th>agent</th>
 
 function renderPanes(){
   const P=$('panes');
-  if(cur==='Overview'){
+  if(cur==='概览'){
     const st=DATA.status||{}, se=DATA.sessions0||{bindings:[]};
     P.innerHTML=`<div class="grid">
       <div class="card"><h2>Service <span class="pill ${st.status==='degraded'?'bad':'ok'}">${esc(st.status||'—')}</span></h2>
@@ -113,7 +114,7 @@ function renderPanes(){
       <div class="card"><h2>Agents</h2>${ag(st.agents)}</div>
       <div class="card"><h2>Live Bindings</h2>${bind(se.bindings)}</div>
     </div>`;
-  } else if(cur==='Sessions'){
+  } else if(cur==='会话'){
     const ss=DATA.sessions?.sessions||[];
     P.innerHTML=`<div class="card"><h2>Sessions (${ss.length})</h2>
       ${ss.length?`<table><tr><th>channel</th><th>chat</th><th>agent</th><th>model (pinned)</th><th>idle</th></tr>`+
@@ -121,14 +122,14 @@ function renderPanes(){
         <td><code>${esc(s.model||'—')}</code></td>
         <td class="age ${s.idle_s>600?'stale':''}">${Math.round(s.idle_s)}s</td></tr>`).join('')+'</table>'
       :'<div class="empty">no sessions</div>'}</div>`;
-  } else if(cur==='Conversations'){
+  } else if(cur==='对话'){
     const cs=DATA.convs?.conversations||[];
     P.innerHTML=cs.length?cs.map(c=>`<div class="card">
       <h2>${esc(c.binding_key)} <span class="age">${c.turns} turns · ${ago(c.updated_at)}s ago</span></h2>
       ${c.log.slice(-20).map(m=>`<div class="msg ${esc(m.role)}"><span class="who">${esc(m.role)}</span>${esc(m.text||'')}</div>`).join('')}
       </div>`).join('')
     :`<div class="card"><div class="empty">no conversations recorded</div></div>`;
-  } else if(cur==='Approvals'){
+  } else if(cur==='审批'){
     const ap=DATA.approvals?.approvals||[];
     P.innerHTML=ap.length?ap.map(a=>{
       const opts=(a.options||[]).map(o=>`<span class="badge kind-${(o.kind||'').includes('reject')?'deny':'allow'}">${esc(o.name||o.option_id)}</span>`).join('');
@@ -140,10 +141,7 @@ function renderPanes(){
         <div class="opts">${opts}</div></div>`;
     }).join('')
     :`<div class="card"><div class="empty">no pending approvals — nothing waiting</div></div>`;
-  } else if(cur==='Config'){
-    P.innerHTML=`<div class="card"><h2>Effective config (secrets redacted)</h2>
-      <pre class="config">${esc(JSON.stringify(DATA.config?.config||{},null,2))}</pre></div>`;
-  } else if(cur==='Ops'){
+  } else if(cur==='管理'){
     renderOps();
   }
 }
@@ -195,15 +193,25 @@ async function renderOps(){
       <div class="row"><label class="k"><input type="checkbox" id="bd-cont" checked> 保留历史（跨 agent 迁移文本）</label></div>
       <div class="row"><button class="btn" onclick="doBind()">绑定</button></div>
     </div>
-    <div class="card"><h2>当前绑定</h2>${bindTable()}</div>
+    <div class="card" style="grid-column:1/-1"><h2>绑定（含历史会话）</h2>${bindTable()}</div>
+    <div class="card" style="grid-column:1/-1"><h2>生效配置（secret 已脱敏）</h2>
+      <pre class="config">${esc(JSON.stringify(DATA.config?.config||{},null,2))}</pre></div>
   </div>
   <div id="ops-toast" style="min-height:26px;font-size:15px;margin-top:8px"></div>`;
 }
 function bindTable(){
-  const bs=(DATA.sessions0?.bindings||[]);
-  return bs.length?`<table><tr><th>channel</th><th>chat</th><th>agent</th><th></th></tr>`+
-    bs.map(b=>`<tr><td>${esc(b.channel)}</td><td>${esc(b.chat_id)}</td><td>${esc(b.agent)}</td>
-      <td><button class="btn sm danger" onclick="doUnbind('${esc(b.channel)}','${esc(b.chat_id)}')">解绑</button></td></tr>`).join('')+'</table>'
+  // merge: live bindings (memory) + persisted sessions (session_records via /api/conversations)
+  const live=DATA.sessions0?.bindings||[];
+  const liveKeys=new Set(live.map(b=>b.channel+':'+b.chat_id));
+  const recs=(DATA.convs?.conversations||[])
+    .filter(c=>!liveKeys.has(c.binding_key))
+    .map(c=>{const [channel,...rest]=c.binding_key.split(':');
+      return {channel,chat_id:rest.join(':'),agent:c.agent,live:false,turns:c.turns};});
+  const rows=live.map(b=>({...b,live:true})).concat(recs);
+  return rows.length?`<table><tr><th>channel</th><th>chat</th><th>agent</th><th>状态</th><th></th></tr>`+
+    rows.map(b=>`<tr><td>${esc(b.channel)}</td><td>${esc(b.chat_id)}</td><td>${esc(b.agent)}</td>
+      <td>${b.live?'<span class="pill ok">活跃</span>':`<span class="age">历史 · ${b.turns} turns</span>`}</td>
+      <td>${b.live?`<button class="btn sm danger" onclick="doUnbind('${esc(b.channel)}','${esc(b.chat_id)}')">解绑</button>`:''}</td></tr>`).join('')+'</table>'
     :'<div class="empty">无绑定</div>';
 }
 const CH_LABEL={wecom:'wecom（企微智能机器人）','wecom-app':'wecom-app（企微应用）',weixin:'weixin'};
@@ -294,8 +302,33 @@ async function load(){
   DATA.approvals=await g('api/approvals');
   DATA.config=await g('api/config');
   $('ts').textContent=new Date().toLocaleTimeString();
+  const st=DATA.status.status||'unreachable';
+  const lamp=$('lamp');
+  lamp.className='dot '+(st==='running'?'ok':st==='degraded'?'warn':'bad');
+  $('lampTxt').textContent=st==='running'?'运行中':st==='degraded'?'降级':'不可达';
  }catch(e){DATA.status={status:'unreachable'}}
  renderTabs();renderPanes();
+}
+let opsDirty=false; // 表单填写中 -> 自动刷新只拉数据不重渲染
+$('panes').addEventListener('input',()=>{if(cur==='Ops')opsDirty=true});
+$('panes').addEventListener('click',e=>{if(e.target.closest('.btn'))opsDirty=false});
+async function load(){
+ try{
+  const g=u=>fetch(u).then(r=>r.ok?r.json():null);
+  DATA.status=await g('status')||{};
+  DATA.sessions0=await g('sessions')||{bindings:[]};
+  DATA.sessions=await g('api/sessions');
+  DATA.convs=await g('api/conversations');
+  DATA.approvals=await g('api/approvals');
+  try{DATA.ops=await post('api/ops-state',{});}catch(e){}
+  $('ts').textContent=new Date().toLocaleTimeString();
+  const st=DATA.status.status||'unreachable';
+  const lamp=$('lamp');
+  lamp.className='dot '+(st==='running'?'ok':st==='degraded'?'warn':'bad');
+  $('lampTxt').textContent=st==='running'?'运行中':st==='degraded'?'降级':'不可达';
+ }catch(e){DATA.status={status:'unreachable'}}
+ if(cur==='Ops'){ if(!opsDirty) renderOps(); }
+ else { renderTabs();renderPanes(); }
 }
 $('refresh').onclick=load;setInterval(load,10000);load();
 </script></body></html>"""
