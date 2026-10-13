@@ -135,7 +135,7 @@ class WecomAibotChannel:
                 cmd = msg.get("cmd", "")
                 keys = sorted(msg.keys())
                 if "aibot_msg_callback" in raw or "chatid" in raw:
-                    self._logger.info(f"[wecom] recv keys={keys} cmd={cmd} chatid={(msg.get('body') or msg).get('chatid')} msgtype={(msg.get('body') or msg).get('msgtype')} text={str((msg.get('body') or msg).get('text'))[:60]}")
+                    self._logger.info(f"[wecom] frame: {raw[:220]}")
                 try:
                     self._dispatch(msg, ws)
                 except Exception as e:  # noqa: BLE001
