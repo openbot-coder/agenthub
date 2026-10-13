@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from agenthub.admin_ui import render_index
+
 
 class StatusHTTP:
     def __init__(self, mgr: Any, host: str = "127.0.0.1", port: int = 30990):
@@ -107,8 +109,18 @@ class StatusHTTP:
 
             def do_GET(self):
                 parsed = urlparse(self.path)
-                self._route_get(parsed.path.rstrip("/") or "/", parse_qs(parsed.query))
-
+                path = parsed.path.rstrip("/") or "/"
+                if path in ("/", "/ui", "/index.html"):
+                    # Admin UI (browser-facing): the same nginx /agents/ prefix
+                    # serves it; JSON endpoints remain for programmatic access.
+                    data = render_index().encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                self._route_get(path, parse_qs(parsed.query))
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 self._route_post(urlparse(self.path).path.rstrip("/"), self.rfile.read(length))
