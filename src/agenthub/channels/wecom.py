@@ -132,6 +132,9 @@ class WecomAibotChannel:
                 if raw is None:
                     continue
                 msg = json.loads(raw)
+                cmd = msg.get("cmd", "")
+                if cmd:  # skip ack/pong frames (no cmd? actually acks have no cmd)
+                    self._logger.info(f"[wecom] recv cmd={cmd} chatid={(msg.get('body') or {}).get('chatid')} msgtype={(msg.get('body') or {}).get('msgtype')}")
                 try:
                     self._dispatch(msg, ws)
                 except Exception as e:  # noqa: BLE001
