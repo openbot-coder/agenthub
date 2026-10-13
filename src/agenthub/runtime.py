@@ -194,8 +194,14 @@ def main(argv: list[str] | None = None) -> None:
         from .http_admin import StatusHTTP
 
         http_cfg = cfg.get("http", {})
-        http = StatusHTTP(mgr, host=http_cfg.get("listen_host", "127.0.0.1"), port=int(http_cfg.get("port", 30990)))
+        http = StatusHTTP(
+            mgr,
+            host=http_cfg.get("listen_host", "127.0.0.1"),
+            port=int(http_cfg.get("port", 30990)),
+            admin_cfg=http_cfg.get("admin"),  # None -> UI/api fail-closed 503
+        )
         http.channels = chans  # /status reports per-channel connection state
+        http.effective_cfg = cfg  # /api/config (sanitized at render time)
         http.start()
         log.info(f"status http on {http.host}:{http.port}")
     except Exception as e:  # noqa: BLE001
