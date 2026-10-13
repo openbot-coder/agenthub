@@ -124,7 +124,16 @@ def _safe_inbound(mgr: SessionManager, ch, m) -> None:
                 if res is not None:
                     _safe_event(ch, f"{ch.name}:{m.chat_id}", "command_result", res)
                     return
-            # 3) normal prompt
+            # 3) binding visibility: no binding yet -> tell the user which
+            #    agent WILL handle this chat (auto-bound on first turn), so
+            #    routing is never silent/mysterious
+            if mgr.get_binding(ch.name, m.chat_id) is None:
+                default = mgr._default_agent()
+                mgr._emit(f"{ch.name}:{m.chat_id}", "status", {
+                    "text": f"当前会话尚未绑定 agent，将由默认 agent「{default}」处理"
+                            "（如需指定其他 agent，回复 /agents 查看、/switch <名> 切换）。",
+                })
+            # 4) normal prompt
             mgr.prompt(ch.name, m.chat_id, m.text, images=m.images)
         except Exception as e:  # noqa: BLE001
             import logging
