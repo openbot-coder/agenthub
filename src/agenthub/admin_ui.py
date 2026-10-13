@@ -53,6 +53,12 @@ pre.config{font-size:14px;color:var(--muted);white-space:pre-wrap;word-break:bre
 .age{color:var(--muted);font-size:13px;font-weight:400;text-transform:none;letter-spacing:0}
 .stale{color:var(--amber)}
 @media(max-width:760px){body{padding:16px}.grid{grid-template-columns:1fr}.kv{font-size:22px}}
+input,select{background:#0d1117;border:1px solid var(--border);border-radius:6px;color:var(--fg);font-family:var(--mono);font-size:15px;padding:8px 10px}
+input:focus,select:focus{outline:none;border-color:var(--blue)}
+.btn{background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:15px;padding:8px 18px;cursor:pointer}
+.btn:hover{border-color:var(--blue);color:var(--blue)}
+.btn.danger{color:var(--red)}
+.btn.danger:hover{border-color:var(--red)}
 """
 
 HTML = """<!DOCTYPE html>
@@ -73,7 +79,7 @@ const fmtUp=s=>{if(s<60)return Math.round(s)+'s';if(s<3600)return Math.floor(s/6
 const ago=t=>Math.max(0,Math.round(Date.now()/1000-t));
 
 let DATA={};
-const TABS=['Overview','Sessions','Conversations','Approvals','Config'];
+const TABS=['Overview','Sessions','Conversations','Approvals','Config','Ops'];
 let cur='Overview';
 function renderTabs(){
   const pend=(DATA.approvals?.approvals||[]).filter(a=>!a.answered).length;
@@ -136,7 +142,105 @@ function renderPanes(){
   } else if(cur==='Config'){
     P.innerHTML=`<div class="card"><h2>Effective config (secrets redacted)</h2>
       <pre class="config">${esc(JSON.stringify(DATA.config?.config||{},null,2))}</pre></div>`;
+  } else if(cur==='Ops'){
+    renderOps();
   }
+}
+
+// ---- Ops tab: channel / agent / binding management (write ops) ----
+async function post(u,body){
+  const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error||r.status);
+  return j;
+}
+function toast(ok,msg){
+  const t=$('ops-toast');
+  t.textContent=(ok?'✓ ':'✗ ')+msg;
+  t.style.color=ok?'var(--green)':'var(--red)';
+  setTimeout(()=>{t.textContent=''},6000);
+}
+async function renderOps(){
+  const P=$('panes');
+  let st={channels:[],agents:[]};
+  try{ st=await post('api/ops-state',{})||st; }catch(e){}
+  const pend=st.pending_restart;
+  P.innerHTML=`
+  ${pend?`<div class="card" style="border-color:var(--amber)"><h2 style="color:var(--amber)">⚠ Channel config changed</h2>
+    <div class="row"><span class="k">IM channels are long-lived connections — a service restart is needed to pick up changes.</span></div></div>`:''}
+  <div class="grid">
+    <div class="card"><h2>1 · IM 渠道</h2>
+      <div class="row"><span class="k">已配置</span><span>${esc((st.channels||[]).join(', ')||'—')}</span></div>
+      <div class="row"><span class="k">类型</span><select id="ch-name">
+        <option value="wecom">wecom（企微智能机器人）</option>
+        <option value="wecom-app">wecom-app（企微应用）</option>
+        <option value="weixin">weixin</option></select></div>
+      <div id="ch-fields"></div>
+      <div class="row"><button class="btn" onclick="saveChannel()">保存渠道</button>
+        <button class="btn danger" onclick="delChannel()">删除</button></div>
+    </div>
+    <div class="card"><h2>2 · ACP Agent</h2>
+      <div class="row"><span class="k">已配置</span><span>${esc((st.agents||[]).join(', ')||'—')}</span></div>
+      <div class="row"><span class="k">名称</span><input id="ag-name" placeholder="opencode"></div>
+      <div class="row"><span class="k">启动命令</span><input id="ag-cmd" placeholder="opencode acp" style="width:60%"></div>
+      <div class="row"><span class="k">默认模型</span><input id="ag-model" placeholder="留空 = agent 默认" style="width:60%"></div>
+      <div class="row"><span class="k">cwd 白名单</span><input id="ag-cwd" placeholder="逗号分隔，可空" style="width:60%"></div>
+      <div class="row"><button class="btn" onclick="saveAgent()">保存 Agent</button>
+        <button class="btn danger" onclick="delAgent()">删除</button></div>
+    </div>
+    <div class="card"><h2>3 · 绑定 IM ⇄ Agent</h2>
+      <div class="row"><span class="k">channel</span><input id="bd-ch" placeholder="wecom" style="width:50%"></div>
+      <div class="row"><span class="k">chat_id</span><input id="bd-chat" placeholder="会话 ID" style="width:50%"></div>
+      <div class="row"><span class="k">agent</span><select id="bd-ag">${(st.agents||[]).map(a=>`<option>${esc(a)}</option>`).join('')}</select></div>
+      <div class="row"><label class="k"><input type="checkbox" id="bd-cont" checked> 保留历史（跨 agent 迁移文本）</label></div>
+      <div class="row"><button class="btn" onclick="doBind()">绑定</button>
+        <button class="btn danger" onclick="doUnbind()">解绑</button></div>
+      <div class="meta">绑定即建立新 ACP 会话并写库；会话里用户可随时 /switch。</div>
+    </div>
+  </div>
+  <div id="ops-toast" style="min-height:26px;font-size:15px;margin-top:8px"></div>`;
+  $('ch-name').onchange=renderChFields;renderChFields();
+}
+function renderChFields(){
+  const req={wecom:[['bot_id','bot_id'],['secret','secret（写入 config.json，不回显）']],
+    'wecom-app':[['corp_id','corp_id'],['secret','secret'],['agent_id','agent_id']],
+    weixin:[['token','token']]}[$('ch-name').value]||[];
+  $('ch-fields').innerHTML=req.map(([k,ph])=>`<div class="row"><span class="k">${esc(k)}</span>
+    <input id="chf-${esc(k)}" placeholder="${esc(ph)}" style="width:55%" type="${k==='secret'||k==='token'?'password':'text'}"></div>`).join('');
+}
+async function saveChannel(){
+  try{ const name=$('ch-name').value;
+    const fields={}; document.querySelectorAll('[id^=chf-]').forEach(i=>{if(i.value)fields[i.id.slice(4)]=i.value});
+    const r=await post('api/channel',{name,fields});
+    toast(true,`渠道 ${name} 已保存`+(r.existed?'（覆盖）':'')+' · 需重启生效');
+  }catch(e){toast(false,e.message)}
+}
+async function delChannel(){
+  try{ await post('api/channel/delete',{name:$('ch-name').value});
+    toast(true,'渠道已删除 · 需重启生效'); }catch(e){toast(false,e.message)}
+}
+async function saveAgent(){
+  try{ const name=$('ag-name').value.trim();
+    const fields={cmd:$('ag-cmd').value};
+    if($('ag-model').value)fields.default_model=$('ag-model').value.trim();
+    if($('ag-cwd').value)fields.cwd_whitelist=$('ag-cwd').value;
+    const r=await post('api/agent',{name,fields});
+    toast(true,`agent ${name} 已保存`+(r.existed?'（覆盖）':'')+'，即时生效');
+  }catch(e){toast(false,e.message)}
+}
+async function delAgent(){
+  try{ await post('api/agent/delete',{name:$('ag-name').value.trim()});
+    toast(true,'agent 已删除'); }catch(e){toast(false,e.message)}
+}
+async function doBind(){
+  try{ const r=await post('api/bind',{channel:$('bd-ch').value.trim(),chat_id:$('bd-chat').value.trim(),
+    agent:$('bd-ag').value,continue_history:$('bd-cont').checked});
+    toast(true,`已绑定 ${r.binding} → ${r.agent}（会话 ${String(r.acp_session_id).slice(0,12)}…）`);load();
+  }catch(e){toast(false,e.message)}
+}
+async function doUnbind(){
+  try{ await post('api/unbind',{channel:$('bd-ch').value.trim(),chat_id:$('bd-chat').value.trim()});
+    toast(true,'已解绑');load(); }catch(e){toast(false,e.message)}
 }
 
 async function load(){

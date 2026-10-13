@@ -34,6 +34,7 @@ from agenthub.admin_data import (
     sanitize_config,
     sessions_payload,
 )
+from agenthub.admin_ops import AdminWriteError
 from agenthub.admin_ui import render_index
 
 
@@ -50,6 +51,7 @@ class StatusHTTP:
         self.port = port
         self.admin_cfg = admin_cfg  # {"username","password"} or None (fail-closed)
         self.effective_cfg: dict[str, Any] = {}  # injected by runtime.main()
+        self.ops: Any = None  # AdminWrites, injected by runtime.main()
         self.started = time.time()
         self.channels: list = []  # injected by runtime.main() after build_channels
         self._server: ThreadingHTTPServer | None = None
@@ -155,6 +157,42 @@ class StatusHTTP:
                     self._json(404, {"error": "not found"})
 
             def _route_post(self, path: str, body: bytes) -> None:
+                # admin write ops: auth required; /prompt stays open (nginx-gated)
+                if path.startswith("/api/") and path != "/api/prompt":
+                    if not self._require_auth():
+                        return
+                    ops = outer.ops
+                    if ops is None:
+                        self._json(503, {"error": "admin writes not configured (no config path)"})
+                        return
+                    try:
+                        req = json.loads(body or b"{}")
+                        if path == "/api/channel":
+                            self._json(200, ops.upsert_channel(req["name"], req.get("fields", {})))
+                        elif path == "/api/channel/delete":
+                            self._json(200, ops.delete_channel(req["name"]))
+                        elif path == "/api/agent":
+                            self._json(200, ops.upsert_agent(req["name"], req.get("fields", {})))
+                        elif path == "/api/agent/delete":
+                            self._json(200, ops.delete_agent(req["name"]))
+                        elif path == "/api/bind":
+                            self._json(200, ops.bind(
+                                req["channel"], str(req["chat_id"]), req["agent"],
+                                continue_history=bool(req.get("continue_history", True)),
+                            ))
+                        elif path == "/api/unbind":
+                            self._json(200, ops.unbind(req["channel"], str(req["chat_id"])))
+                        elif path == "/api/ops-state":
+                            self._json(200, ops.state())
+                        else:
+                            self._json(404, {"error": "not found"})
+                    except AdminWriteError as e:
+                        self._json(400, {"error": str(e)})
+                    except KeyError as e:
+                        self._json(400, {"error": f"missing field {e}"})
+                    except Exception as e:  # noqa: BLE001
+                        self._json(500, {"error": str(e)})
+                    return
                 if path != "/prompt":
                     self._json(404, {"error": "not found"})
                     return

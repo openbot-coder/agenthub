@@ -202,6 +202,12 @@ def main(argv: list[str] | None = None) -> None:
         )
         http.channels = chans  # /status reports per-channel connection state
         http.effective_cfg = cfg  # /api/config (sanitized at render time)
+        try:
+            from .admin_ops import AdminWrites
+
+            http.ops = AdminWrites(mgr, os.path.abspath(args.config))
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"admin writes disabled: {e}")
         http.start()
         log.info(f"status http on {http.host}:{http.port}")
     except Exception as e:  # noqa: BLE001
