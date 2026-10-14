@@ -348,15 +348,22 @@ class WecomAibotChannel:
         self._logger.info(f"[wecom] card click: key={event_key[:60]} by={sender}")
         req_id, _, option_id = event_key.partition("|")
         answered = False
+        reason = ""
         if req_id and option_id and self.card_answer_cb:
             try:
                 self.card_answer_cb(req_id, option_id, sender)
                 answered = True
             except Exception as e:  # noqa: BLE001
+                reason = str(e)
                 self._logger.error(f"[wecom] card answer failed: {e}")
         # update the card so the user sees the decision was taken
         task_id = str(evt.get("task_id") or "").replace("-", "_").replace("@", "_")[:128]
-        title = "✅ 已批准" if answered and "reject" not in option_id else ("❌ 已拒绝" if answered else "⚠️ 处理失败")
+        if answered:
+            title = "✅ 已批准" if "reject" not in option_id else "❌ 已拒绝"
+        elif "no pending permission" in reason:
+            title = "⚠️ 该审批已失效（已处理、超时或服务重启）"
+        else:
+            title = "⚠️ 处理失败"
         try:
             self._send(
                 {
