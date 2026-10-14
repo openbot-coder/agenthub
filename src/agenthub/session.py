@@ -675,6 +675,10 @@ class SessionManager:
                     pr = self._pending_permissions.get(req_id)
                 if pr is not None:
                     pr.presented = True
+                self._logger.info(
+                    f"[sessions] approval requested: {req_id[:12]} agent={b.agent} "
+                    f"tool={tool.get('title', '')[:60]} -> {key}"
+                )
                 self._emit(key, "interaction", {
                     "interaction_type": "permission",
                     "request_id": req_id,
