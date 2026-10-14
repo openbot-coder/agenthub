@@ -76,7 +76,10 @@ def build_channels(cfg: dict[str, Any], mgr: SessionManager) -> list:
         wcfg = ccfg["wecom"]
         # real long-connection transport unless the config says otherwise
         ws_factory = None if wcfg.get("mock_transport") else make_ws_factory()
-        sink_and_inbound(WecomAibotChannel(wcfg, ws_factory=ws_factory))
+        wecom = WecomAibotChannel(wcfg, ws_factory=ws_factory)
+        # approval card button clicks answer the pending permission directly
+        wecom.card_answer_cb = lambda req, opt, by: mgr.answer_card(req, opt, by)
+        sink_and_inbound(wecom)
     if "wecom-app" in ccfg:
         sink_and_inbound(WecomAppChannel(ccfg["wecom-app"]))
     if "weixin" in ccfg:

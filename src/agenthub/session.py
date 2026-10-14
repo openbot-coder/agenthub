@@ -480,6 +480,21 @@ class SessionManager:
             if pr is not None:
                 pr.route_key = route_key
 
+    def answer_card(self, request_id: str, option_id: str, answered_by: str = "") -> None:
+        """Answer a pending permission from a template-card button click.
+
+        The card key carries the exact request_id + option_id, so no chat
+        matching is needed; presented is required (same anti-race rule as
+        permission_reply)."""
+        with self._lock:
+            pr = self._pending_permissions.get(request_id)
+        if pr is None:
+            raise SessionError(f"no pending permission {request_id}")
+        if not pr.presented:
+            raise SessionError("permission request not yet shown; try again in a moment")
+        pr.choice = option_id
+        pr.answered.set()
+
     def permission_reply(self, channel: str, chat_id: str, request_id: str, choice: str) -> None:
         """Answer a pending permission/interaction.
 

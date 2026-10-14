@@ -61,6 +61,9 @@ class WecomAibotChannel:
         self._streams: dict[str, dict] = {}
         self._req_ids: dict[str, str] = {}
         self._stream_lock = threading.Lock()
+        # approval card answers: set by runtime, called as
+        # cb(request_id, option_id, answered_by) -> None
+        self.card_answer_cb: Callable[[str, str, str], None] | None = None
 
     # -- IMChannel ---------------------------------------------------------
     def start(self) -> None:
@@ -165,6 +168,8 @@ class WecomAibotChannel:
             event = (body.get("event") or {}).get("eventtype", "")
             if event == "enter_chat":
                 self._respond_welcome(ws, req_id)
+            elif event == "template_card_event":
+                self._on_card_click(body, ws, req_id)
             return
 
         sender = (body.get("from") or {}).get("userid") or body.get("sender") or ""
@@ -275,9 +280,16 @@ class WecomAibotChannel:
             if marker:
                 self._stream_append(chat_id, marker)
         elif kind == "interaction":
-            # approval / choice question: close current bubble with a
-            # structured render; user replies in chat (M1: text-based choice)
-            self._stream_close(chat_id, _interaction_text(payload))
+            # approval / choice question: render as an interactive template
+            # card (button_interaction); falls back to text if the card send
+            # is not possible. The card click callback answers via
+            # card_answer_cb; numbered text replies still work.
+            try:
+                self._send_approval_card(chat_id, payload)
+                self._stream_close(chat_id, "🔒 审批请求已发卡片，请点击按钮或回复编号。")
+            except Exception as e:  # noqa: BLE001
+                self._logger.warning(f"[wecom] approval card send failed: {e}")
+                self._stream_close(chat_id, _interaction_text(payload))
         elif kind == "command_result":
             self.reply(chat_id, _command_result_text(payload))
         elif kind == "final":
@@ -285,6 +297,83 @@ class WecomAibotChannel:
         elif kind == "permission":
             self.reply(chat_id, _interaction_text(payload))
         # "replace" treated as delta reset for now
+
+    # -- approval cards ------------------------------------------------------
+    _BTN_STYLE = {"allow_once": 1, "always_once": 1, "reject_once": 4}  # 1 primary, 4 danger
+
+    def _send_approval_card(self, chat_id: str, payload: dict[str, Any]) -> None:
+        """Send a button_interaction template card via aibot_send_msg.
+
+        Button key = '<request_id>|<option_id>' so the click callback can
+        route the answer back to the exact pending permission. task_id is
+        the request_id (unique per approval, reused by the update call).
+        """
+        req_id = str(payload.get("request_id") or "")
+        opts = payload.get("options") or []
+        buttons = [
+            {
+                "text": str(o.get("name") or o.get("option_id"))[:12],
+                "style": self._BTN_STYLE.get(o.get("kind"), 0),
+                "key": f"{req_id}|{o.get('option_id')}",
+            }
+            for o in opts
+        ][:6]  # WeCom card cap: 6 buttons
+        card = {
+            "card_type": "button_interaction",
+            "source": {"desc": "agenthub"},
+            "main_title": {"title": f"🔐 {str(payload.get('tool') or '审批请求')[:26]}"},
+            "sub_title_text": f"agent: {payload.get('agent', '')} · 请求 {req_id[:8]}",
+            "button_list": buttons,
+            "task_id": req_id.replace("-", "_").replace("@", "_")[:128],
+        }
+        self._send(
+            {
+                "cmd": "aibot_send_msg",
+                "headers": {"req_id": uuid.uuid4().hex},
+                "body": {
+                    "chatid": chat_id,
+                    "chat_type": 0,
+                    "msgtype": "template_card",
+                    "template_card": card,
+                },
+            }
+        )
+
+    def _on_card_click(self, body: dict[str, Any], ws: Any, cb_req_id: str) -> None:
+        """aibot_event_callback eventtype=template_card_event: route the
+        button answer to the pending permission, then update the card."""
+        evt = (body.get("event") or {}).get("template_card_event") or {}
+        event_key = str(evt.get("event_key") or "")
+        sender = str(((body.get("from") or {}).get("userid")) or "")
+        self._logger.info(f"[wecom] card click: key={event_key[:60]} by={sender}")
+        req_id, _, option_id = event_key.partition("|")
+        answered = False
+        if req_id and option_id and self.card_answer_cb:
+            try:
+                self.card_answer_cb(req_id, option_id, sender)
+                answered = True
+            except Exception as e:  # noqa: BLE001
+                self._logger.error(f"[wecom] card answer failed: {e}")
+        # update the card so the user sees the decision was taken
+        task_id = str(evt.get("task_id") or "").replace("-", "_").replace("@", "_")[:128]
+        title = "✅ 已批准" if answered and "reject" not in option_id else ("❌ 已拒绝" if answered else "⚠️ 处理失败")
+        try:
+            self._send(
+                {
+                    "cmd": "aibot_respond_update_msg",
+                    "headers": {"req_id": cb_req_id},
+                    "body": {
+                        "response_type": "update_template_card",
+                        "template_card": {
+                            "card_type": "button_interaction",
+                            "main_title": {"title": f"{title} · {req_id[:8]}"},
+                            "task_id": task_id,
+                        },
+                    },
+                }
+            )
+        except Exception as e:  # noqa: BLE001
+            self._logger.warning(f"[wecom] card update failed: {e}")
 
     # -- streaming state ---------------------------------------------------
     def _stream_key_states(self, chat_id: str) -> dict:
