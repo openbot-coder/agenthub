@@ -68,9 +68,6 @@ def build_channels(cfg: dict[str, Any], mgr: SessionManager) -> list:
         ch.on_message(
             lambda m: _safe_inbound(mgr, ch, m)
         )
-        mgr.set_event_sink(
-            lambda key, kind, payload: _safe_event(ch, key, kind, payload)
-        )
         channels.append(ch)
 
     if "wecom" in ccfg:
@@ -84,7 +81,53 @@ def build_channels(cfg: dict[str, Any], mgr: SessionManager) -> list:
         sink_and_inbound(WecomAppChannel(ccfg["wecom-app"]))
     if "weixin" in ccfg:
         sink_and_inbound(WeixinChannel(ccfg["weixin"]))
+
+    # ONE dispatch-all event sink (per-channel sinks would overwrite each
+    # other; _safe_event filters per channel name anyway). Approvals
+    # (interaction events) are additionally routed to the wecom approval
+    # chat when configured: channels.wecom.approval_chat.
+    def dispatch_all(key: str, kind: str, payload: dict[str, Any]) -> None:
+        for ch in channels:
+            _safe_event(ch, key, kind, payload)
+        if kind == "interaction":
+            _route_approval(channels, ccfg, mgr, key, payload)
+
+    mgr.set_event_sink(dispatch_all)
     return channels
+
+
+def _route_approval(channels: list, ccfg: dict[str, Any], mgr: SessionManager,
+                    key: str, payload: dict[str, Any]) -> None:
+    """Deliver an approval/question to the wecom approval chat.
+
+    Config: channels.wecom.approval_chat = "<chat_id>" (e.g. a user id).
+    The originating channel still gets its own copy; this ADDS a wecom
+    delivery so approvals are answerable from wecom even when the turn
+    started on another channel. The pending permission's route_key is
+    stamped (mgr.set_route) so a reply from the approval chat matches.
+    """
+    wcfg = ccfg.get("wecom") or {}
+    approval_chat = wcfg.get("approval_chat")
+    if not approval_chat:
+        return
+    wecom = next((c for c in channels if c.name == "wecom"), None)
+    if wecom is None:
+        return
+    origin = f"wecom:{approval_chat}"
+    if key == origin:
+        return  # already delivered to the approval chat directly
+    req_id = payload.get("request_id")
+    if req_id:
+        try:
+            mgr.set_route(str(req_id), origin)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"[wecom] approval route stamp failed: {e}")
+    routed = dict(payload)
+    routed["routed_from"] = key
+    try:
+        wecom.push_event(approval_chat, "interaction", routed)
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"[wecom] approval route to {approval_chat} failed: {e}")
 
 
 def _safe_inbound(mgr: SessionManager, ch, m) -> None:

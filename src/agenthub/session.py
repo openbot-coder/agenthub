@@ -86,6 +86,7 @@ class PermissionRequest:
     answered: threading.Event = field(default_factory=threading.Event)
     choice: str | None = None  # optionId chosen, None = timeout/deny
     presented: bool = False  # interaction event emitted to the front-end
+    route_key: str | None = None  # approval chat "channel:chat_id" if routed elsewhere (e.g. wecom approval)
 
 
 def _is_transient_model_error(msg: str) -> bool:
@@ -414,10 +415,16 @@ class SessionManager:
 
     # -- permission ---------------------------------------------------------------
     def pending_interaction(self, channel: str, chat_id: str) -> dict[str, Any] | None:
-        """The most recent pending interaction for this chat, if any."""
+        """The most recent pending interaction for this chat, if any.
+
+        Matches either the originating chat key or the approval route_key
+        (so an approval routed to the wecom approval chat can be answered
+        from that chat even though the agent turn started elsewhere).
+        """
         key = f"{channel}:{chat_id}"
         with self._lock:
-            pendings = [p for p in self._pending_permissions.values() if p.key == key]
+            pendings = [p for p in self._pending_permissions.values()
+                        if p.key == key or p.route_key == key]
         if not pendings:
             return None
         pr = pendings[-1]  # newest
@@ -465,6 +472,14 @@ class SessionManager:
         self.permission_reply(channel, chat_id, inter["request_id"], choice)
         return "consumed"
 
+    def set_route(self, request_id: str, route_key: str) -> None:
+        """Stamp an approval route so replies from the routed chat (e.g. the
+        wecom approval chat) are accepted by pending_interaction/reply."""
+        with self._lock:
+            pr = self._pending_permissions.get(request_id)
+            if pr is not None:
+                pr.route_key = route_key
+
     def permission_reply(self, channel: str, chat_id: str, request_id: str, choice: str) -> None:
         """Answer a pending permission/interaction.
 
@@ -476,7 +491,7 @@ class SessionManager:
             pr = self._pending_permissions.get(request_id)
         if pr is None:
             raise SessionError(f"no pending permission {request_id}")
-        if pr.key != f"{channel}:{chat_id}":
+        if pr.key != f"{channel}:{chat_id}" and pr.route_key != f"{channel}:{chat_id}":
             raise SessionError("permission request belongs to a different chat")
         if not pr.presented:
             # never turn a decision on an approval the user has not seen into
