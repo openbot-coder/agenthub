@@ -711,8 +711,15 @@ class SessionManager:
             raise NotImplementedError()
 
         client = self._client_for(b.agent)
-        client.register_notification_handler(handler)
-        client.register_request_handler(on_request)
+        # guard against handler stacking: _attach_update_relay runs on every
+        # prompt, but notification handlers APPEND — duplicates would append
+        # each delta N times (N = prompts so far) into final text. Re-register
+        # only when this session has no relay yet.
+        if not any(getattr(h, "_relay_session", None) == session_id for h in getattr(client, "_notif_handlers", [])):
+            handler._relay_session = session_id
+            on_request._relay_session = session_id
+            client.register_notification_handler(handler)
+            client.register_request_handler(on_request)
 
     # -- hub-side text log ----------------------------------------------------------------
     def _append_text(self, key: str, agent: str, session_id: str, entry: dict[str, str]) -> None:
