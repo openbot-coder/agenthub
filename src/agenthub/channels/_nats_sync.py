@@ -54,6 +54,7 @@ class SyncNATS:
         username: str = "",
         password: str = "",
         connect_timeout: float = 10.0,
+        tls: Any | None = None,
         on_connect: ConnectCallback | None = None,
         on_disconnect: ConnectCallback | None = None,
     ) -> None:
@@ -61,6 +62,7 @@ class SyncNATS:
         self._username = username
         self._password = password
         self._connect_timeout = connect_timeout
+        self._tls = tls
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
 
@@ -119,6 +121,7 @@ class SyncNATS:
                 user=self._username or None,
                 password=self._password or None,
                 connect_timeout=int(self._connect_timeout),
+                tls=self._tls,
                 reconnect_time_wait=1,
                 max_reconnect_attempts=-1,
                 disconnected_cb=_disc,

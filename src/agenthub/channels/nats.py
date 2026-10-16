@@ -18,6 +18,8 @@ Config (dict):
     username / password: str = ""
     in_subject: str = "agenthub.in.>"        # subscription pattern
     out_subject: str = "agenthub.out"        # replies published to out_subject.<chat_id>
+    tls_ca: str = ""                     # CA cert path (enable TLS if set)
+    tls_insecure: bool = False           # skip cert verification (dev only)
     allowed_users: list[str] = []
 
 Requires the ``nats`` extra (nats-py). Reuses octop-gateway's SyncNATS
@@ -63,6 +65,8 @@ class NatsChannel:
         self.password = config.get("password", "")
         self.in_subject = config.get("in_subject", "agenthub.in.>")
         self.out_subject = (config.get("out_subject") or "agenthub.out").rstrip(".")
+        self.tls_ca = config.get("tls_ca", "")
+        self.tls_insecure = bool(config.get("tls_insecure", False))
         self.allowed_users = set(config.get("allowed_users") or [])
         self._nats_factory = nats_factory  # injectable for tests
         self._nc: Any = None
@@ -76,6 +80,18 @@ class NatsChannel:
     def start(self) -> None:
         from ._nats_sync import SyncNATS  # vendored sync wrapper
 
+        kwargs: dict[str, Any] = {}
+        if self.tls_ca or self.tls_insecure:
+            import ssl
+
+            ctx = ssl.create_default_context(
+                cafile=self.tls_ca or None
+            )
+            if self.tls_insecure:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            kwargs["tls"] = ctx
+
         factory = self._nats_factory or SyncNATS
         self._nc = factory(
             self.servers,
@@ -83,6 +99,7 @@ class NatsChannel:
             password=self.password,
             on_connect=lambda: self._logger.info("[nats] connected"),
             on_disconnect=lambda: self._logger.warning("[nats] disconnected; reconnecting"),
+            **kwargs,
         )
         self._sub_id = self._nc.subscribe(self.in_subject, self._on_nats_msg)
         self._logger.info(f"[nats] subscribed {self.in_subject} (out: {self.out_subject}.*)")
