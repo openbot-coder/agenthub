@@ -84,6 +84,10 @@ def build_channels(cfg: dict[str, Any], mgr: SessionManager) -> list:
         sink_and_inbound(WecomAppChannel(ccfg["wecom-app"]))
     if "weixin" in ccfg:
         sink_and_inbound(WeixinChannel(ccfg["weixin"]))
+    if "nats" in ccfg:
+        from .channels.nats import NatsChannel
+
+        sink_and_inbound(NatsChannel(ccfg["nats"]))
 
     # ONE dispatch-all event sink (per-channel sinks would overwrite each
     # other; _safe_event filters per channel name anyway). Approvals
