@@ -156,6 +156,7 @@ class SessionManager:
         self._pending_permissions: dict[str, "PermissionRequest"] = {}
         self.permission_timeout_s = 300  # 5min to answer; timeout -> deny
         self._deltas: dict[str, list[str]] = {}  # binding_key -> accumulated turn text
+        self._media_seen: dict[str, dict[str, float]] = {}  # agent -> workspace file snapshot
 
         self._db: sqlite3.Connection | None = None
         if db_path:
@@ -359,6 +360,7 @@ class SessionManager:
         agent: str | None = None,
         cwd: str | None = None,
         images: list[bytes] | None = None,
+        files: list[dict[str, Any]] | None = None,
         timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Run one turn on the bound (or newly created) session."""
@@ -380,11 +382,26 @@ class SessionManager:
             blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
             for img in images or []:
                 blocks.append({"type": "image", "data": _b64(img), "mimeType": "image/png"})
+            # non-image attachments (video/audio/file): store under media_in/ and
+            # reference the path — agents read files with their own tools
+            stored_files = self._store_inbound_files(b.agent, files or [])
+            if stored_files:
+                note = "\n".join(f"[用户发送了文件: {p} ({name})]" for p, name in stored_files)
+                blocks[0]["text"] = (blocks[0]["text"] + "\n" + note).strip()
             key = f"{channel}:{chat_id}"
             with self._lock:
                 self._deltas[key] = []  # reset accumulated turn text
             self._append_text(key, b.agent, b.acp_session_id, {"role": "user", "text": text})
             self._attach_update_relay(b)
+            # outbound media sentinel: snapshot agent workspace before the turn;
+            # after end_turn, new files become "media" events for the channels
+            ws_dir = self._agent_cwd(b.agent) or os.getcwd()
+            seen_before = self._media_seen.setdefault(b.agent, {})
+            try:
+                from .media import scan_new_files
+                scan_new_files(ws_dir, seen_before)  # pre-turn snapshot
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"[{key}] media pre-scan failed: {e}")
 
             try:
                 res = client.session_prompt(b.acp_session_id, blocks, timeout=timeout_s)
@@ -409,9 +426,46 @@ class SessionManager:
             with self._lock:
                 full_text = "".join(self._deltas.get(key, []))
             self._emit(key, "final", {"text": full_text, "stop_reason": res.get("stopReason")})
+            # post-turn sentinel diff: emit newly produced files as media events
+            try:
+                from .media import scan_new_files
+                for ev in scan_new_files(ws_dir, seen_before):
+                    self._emit(key, "media", ev)
+            except Exception as e:  # noqa: BLE001
+                log.warning(f"[{key}] media post-scan failed: {e}")
             with self._lock:
                 b.last_active = time.time()
             return {"stop_reason": res.get("stopReason"), "session_id": b.acp_session_id, "agent": b.agent}
+
+    # -- media ---------------------------------------------------------------
+    def _agent_cwd(self, agent_name: str) -> str | None:
+        """Agent workspace root: first whitelist entry (expanded) or None."""
+        spec = self.agents.get(agent_name)
+        if spec and spec.cwd_whitelist:
+            return os.path.expanduser(spec.cwd_whitelist[0])
+        return None
+
+    def _media_dir(self, agent: str) -> str:
+        """Directory where inbound attachments are stored for the agent."""
+        root = self._agent_cwd(agent) or os.path.expanduser("~/agenthub-media")
+        d = os.path.join(root, "media_in")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _store_inbound_files(self, agent: str, files: list[dict[str, Any]]) -> list[tuple[str, str]]:
+        """Persist inbound attachments; returns [(abs_path, filename)]."""
+        out: list[tuple[str, str]] = []
+        d = self._media_dir(agent)
+        for f in files:
+            name = os.path.basename(str(f.get("filename") or "file.bin")) or "file.bin"
+            path = os.path.join(d, f"{int(time.time()*1000)}_{name}")
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(bytes(f.get("data") or b""))
+                out.append((path, name))
+            except OSError as e:
+                log.warning(f"[media] store inbound file failed: {e}")
+        return out
 
     # -- permission ---------------------------------------------------------------
     def pending_interaction(self, channel: str, chat_id: str) -> dict[str, Any] | None:

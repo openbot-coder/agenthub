@@ -28,7 +28,7 @@ import time
 import uuid
 from typing import Any, Callable
 
-from .base import IMChannel, InboundMessage, clean_control_chars, split_message_text, _interaction_text, _command_result_text
+from .base import IMChannel, InboundMessage, MediaFile, clean_control_chars, split_message_text, _interaction_text, _command_result_text
 
 class WecomAibotChannel:
     name = "wecom"
@@ -61,6 +61,9 @@ class WecomAibotChannel:
         self._streams: dict[str, dict] = {}
         self._req_ids: dict[str, str] = {}
         self._stream_lock = threading.Lock()
+        # media upload acks: req_id -> {event, msg}
+        self._pending_acks: dict[str, dict] = {}
+        self._ack_lock = threading.Lock()
         # approval card answers: set by runtime, called as
         # cb(request_id, option_id, answered_by) -> None
         self.card_answer_cb: Callable[[str, str, str], None] | None = None
@@ -159,7 +162,9 @@ class WecomAibotChannel:
         """
         cmd = msg.get("cmd", "")
         if msg.get("errcode") is not None and not cmd:
-            return  # ack/pong frame
+            # ack/pong frame — route to a waiting media-upload _request() if any
+            self._deliver_ack(msg)
+            return
         req_id = (msg.get("headers") or {}).get("req_id", "")
         body = msg.get("body") or msg
         msgtype = body.get("msgtype", "text")
@@ -179,6 +184,7 @@ class WecomAibotChannel:
             return
         text = ""
         images: list[bytes] = []
+        files: list[MediaFile] = []
         if msgtype == "text":
             text = (body.get("text") or {}).get("content", "")
         elif msgtype == "image":
@@ -195,13 +201,23 @@ class WecomAibotChannel:
                         images.append(data)
         elif msgtype == "voice":
             text = (body.get("voice") or {}).get("content", "")  # already transcribed
+        elif msgtype == "file":
+            finfo = body.get("file") or {}
+            data = self._download_aibot_image(finfo)
+            if data:
+                files.append(MediaFile(kind="file", data=data, filename=str(finfo.get("filename") or "file.bin")))
+        elif msgtype == "video":
+            vinfo = body.get("video") or {}
+            data = self._download_aibot_image(vinfo)
+            if data:
+                files.append(MediaFile(kind="video", data=data, filename=str(vinfo.get("filename") or "video.mp4")))
         # remember req_id for streaming replies keyed by chat
         if req_id:
             with self._stream_lock:
                 self._req_ids[chat_id] = req_id
         text = clean_control_chars(text, max_len=100000).strip() if text else ""
         # group chat: only respond when @mentioned is handled by WeCom itself
-        if not text and not images:
+        if not text and not images and not files:
             return
         if self._msg_cb:
             self._msg_cb(
@@ -211,6 +227,7 @@ class WecomAibotChannel:
                     user_id=str(sender),
                     text=text,
                     images=images,
+                    files=files,
                     raw={"req_id": req_id, "msgid": body.get("msgid"), "chattype": body.get("chattype"), "msg": msg},
                 )
             )
@@ -294,6 +311,17 @@ class WecomAibotChannel:
             self.reply(chat_id, _command_result_text(payload))
         elif kind == "final":
             self._stream_close(chat_id, str(payload.get("text", "")))
+        elif kind == "media":
+            path = str(payload.get("path", ""))
+            size = int(payload.get("size") or 0)
+            try:
+                sent = self.send_media(chat_id, path) if path else False
+            except Exception as e:  # noqa: BLE001
+                self._logger.warning(f"[wecom] media send failed: {e}")
+                sent = False
+            if not sent:
+                kb = size // 1024
+                self.reply(chat_id, f"📎 已生成文件（{kb} KB）: {path}")
         elif kind == "permission":
             self.reply(chat_id, _interaction_text(payload))
         # "replace" treated as delta reset for now
@@ -461,6 +489,98 @@ class WecomAibotChannel:
             self._logger.warning("[wecom] send buffered, not connected")
             return
         ws.send(raw)
+
+    # -- media: 3-step upload protocol (aibot_upload_media_init/chunk/finish) ----
+    UPLOAD_CHUNK_SIZE = 512 * 1024
+    MEDIA_MAX_BYTES = 20 * 1024 * 1024
+
+    def _deliver_ack(self, msg: dict) -> None:
+        """Route an ack frame to a waiting _request() caller (called from recv loop)."""
+        rid = (msg.get("headers") or {}).get("req_id", "")
+        with self._ack_lock:
+            ev = self._pending_acks.pop(rid, None)
+        if ev is not None:
+            ev["msg"] = msg
+            ev["event"].set()
+
+    def _request(self, cmd: str, body: dict, wait_s: float = 30.0) -> dict | None:
+        """Send a frame and wait for its errcode ack (matched by req_id)."""
+        rid = uuid.uuid4().hex
+        ev = {"event": threading.Event(), "msg": None}
+        with self._ack_lock:
+            self._pending_acks[rid] = ev
+        self._send({"cmd": cmd, "headers": {"req_id": rid}, "body": body})
+        if not ev["event"].wait(wait_s):
+            with self._ack_lock:
+                self._pending_acks.pop(rid, None)
+            return None
+        return ev["msg"]
+
+    def send_media(self, chat_id: str, path: str) -> bool:
+        """Upload a local file and send it as an image/video/voice/file message.
+
+        Returns True when sent. Oversize (>20MB) files are refused (the caller
+        should tell the user the server-side path instead).
+        """
+        import hashlib
+        import os as _os
+
+        try:
+            size = _os.path.getsize(path)
+        except OSError:
+            return False
+        if size > self.MEDIA_MAX_BYTES:
+            self._logger.warning(f"[wecom] media too large, skip upload: {path} ({size}B)")
+            return False
+        name = _os.path.basename(path)
+        ext = _os.path.splitext(name)[1].lower()
+        media_type = ("image" if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+                      else "video" if ext in (".mp4", ".mov", ".avi")
+                      else "voice" if ext in (".amr", ".mp3", ".wav")
+                      else "file")
+        with open(path, "rb") as fh:
+            data = fh.read()
+        md5 = hashlib.md5(data).hexdigest()
+        chunks = [data[i:i + self.UPLOAD_CHUNK_SIZE] for i in range(0, len(data), self.UPLOAD_CHUNK_SIZE)] or [b""]
+
+        ack = self._request("aibot_upload_media_init", {
+            "filename": name, "type": media_type, "total_size": size,
+            "total_chunks": len(chunks), "md5": md5,
+        })
+        if not ack or ack.get("errcode") not in (0, None):
+            self._logger.warning(f"[wecom] upload init failed: {ack}")
+            return False
+        upload_id = (ack.get("body") or {}).get("upload_id", "")
+        if not upload_id:
+            self._logger.warning("[wecom] upload init: no upload_id")
+            return False
+        import base64 as _b64
+        for idx, chunk in enumerate(chunks):
+            ack = self._request("aibot_upload_media_chunk", {
+                "upload_id": upload_id, "chunk_index": idx,
+                "total_chunks": len(chunks),
+                "base64_data": _b64.b64encode(chunk).decode("ascii"),
+            })
+            if not ack or ack.get("errcode") not in (0, None):
+                self._logger.warning(f"[wecom] upload chunk {idx} failed: {ack}")
+                return False
+        ack = self._request("aibot_upload_media_finish", {
+            "upload_id": upload_id, "filename": name, "media_type": media_type,
+        })
+        if not ack or ack.get("errcode") not in (0, None):
+            self._logger.warning(f"[wecom] upload finish failed: {ack}")
+            return False
+        media_id = (ack.get("body") or {}).get("media_id", "")
+        if not media_id:
+            self._logger.warning("[wecom] upload finish: no media_id")
+            return False
+        self._send({
+            "cmd": "aibot_send_msg",
+            "headers": {"req_id": uuid.uuid4().hex},
+            "body": {"chatid": chat_id, "chat_type": 0, "msgtype": media_type,
+                     media_type: {"media_id": media_id}},
+        })
+        return True
 
 
 class _AuthFailure(Exception):

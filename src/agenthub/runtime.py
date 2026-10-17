@@ -184,7 +184,9 @@ def _safe_inbound(mgr: SessionManager, ch, m) -> None:
                             "（如需指定其他 agent，回复 /agents 查看、/switch <名> 切换）。",
                 })
             # 4) normal prompt
-            mgr.prompt(ch.name, m.chat_id, m.text, images=m.images)
+            mgr.prompt(ch.name, m.chat_id, m.text, images=m.images,
+                       files=[{"data": f.data, "filename": f.filename, "mime": f.mime, "kind": f.kind}
+                              for f in getattr(m, "files", []) or []])
         except Exception as e:  # noqa: BLE001
             import logging
             logging.getLogger("agenthub").error(f"[{ch.name}:{m.chat_id}] inbound failed: {e}")

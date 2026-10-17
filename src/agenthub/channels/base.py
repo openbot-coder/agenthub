@@ -15,6 +15,15 @@ from typing import Any, Callable, Protocol
 # ---------------------------------------------------------------------------
 
 @dataclass
+class MediaFile:
+    """One inbound/outbound media attachment (image/video/audio/file)."""
+    kind: str          # "image" | "video" | "audio" | "file"
+    data: bytes = b""
+    filename: str = ""
+    mime: str = "application/octet-stream"
+
+
+@dataclass
 class InboundMessage:
     channel: str                 # "wecom" | "wecom-app" | "weixin" | "nats"
     chat_id: str                 # chat/user identifier within the channel
@@ -22,6 +31,7 @@ class InboundMessage:
     text: str = ""
     images: list[bytes] = field(default_factory=list)   # raw bytes
     image_mime: str = "image/png"
+    files: list[MediaFile] = field(default_factory=list)  # all attachments
     raw: dict[str, Any] = field(default_factory=dict)
 
 
