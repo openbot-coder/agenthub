@@ -140,7 +140,9 @@ class WecomAibotChannel:
                 msg = json.loads(raw)
                 cmd = msg.get("cmd", "")
                 keys = sorted(msg.keys())
-                if "aibot_msg_callback" in raw or "chatid" in raw:
+                if "aibot_msg_callback" in raw or "chatid" in raw or "aibot_event_callback" in raw:
+                    # include event callbacks: card clicks (template_card_event)
+                    # carry no chatid and were previously invisible in logs
                     self._logger.info(f"[wecom] frame: {raw[:220]}")
                 try:
                     self._dispatch(msg, ws)

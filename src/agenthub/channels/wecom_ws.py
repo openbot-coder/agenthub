@@ -48,6 +48,8 @@ class AibotWSAdapter:
         self.secret = cfg["secret"]
         self.ws_url = cfg.get("ws_url", WS_URL)
         self.connect_timeout = float(cfg.get("timeout_s", 20))
+        # heartbeat interval; configurable so tests can shrink it (prod: 30s)
+        self.heartbeat_s = float(cfg.get("heartbeat_s", HEARTBEAT_S))
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws: Any = None
         self._queue: "asyncio.Queue[str | None]" = asyncio.Queue()
@@ -109,7 +111,7 @@ class AibotWSAdapter:
         """No inbound frames (including pong replies) for too long = half-open
         TCP. Heartbeat sends ping but the pong never arrives; raise so the
         outer loop reconnects with a fresh socket."""
-        stale_after = max(HEARTBEAT_S * 10, 300)
+        stale_after = max(self.heartbeat_s * 10, 3 * self.heartbeat_s)
         if time.monotonic() - self._last_inbound > stale_after:
             raise ConnectionError("no inbound frames (incl. pong) for too long")
 
@@ -174,14 +176,14 @@ class AibotWSAdapter:
         misses = 0
         try:
             while not self._stop_ev.is_set() and self._ws is not None:
-                await asyncio.sleep(HEARTBEAT_S)
+                await asyncio.sleep(self.heartbeat_s)
                 if self._ws is None:
                     return
                 try:
                     await self._ws.send(
                         json.dumps({"cmd": "ping", "headers": {"req_id": uuid.uuid4().hex}})
                     )
-                    if time.monotonic() - self._last_inbound < HEARTBEAT_S * 2:
+                    if time.monotonic() - self._last_inbound < self.heartbeat_s * 2:
                         misses = 0
                     else:
                         misses += 1
