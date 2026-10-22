@@ -157,6 +157,7 @@ class SessionManager:
         self.permission_timeout_s = 300  # 5min to answer; timeout -> deny
         self._deltas: dict[str, list[str]] = {}  # binding_key -> accumulated turn text
         self._media_seen: dict[str, dict[str, float]] = {}  # agent -> workspace file snapshot
+        self._pending_followups: dict[tuple[str, str], list[dict[str, Any]]] = {}  # chat key -> queued messages (mid-turn supplements)
 
         self._db: sqlite3.Connection | None = None
         if db_path:
@@ -363,9 +364,87 @@ class SessionManager:
         files: list[dict[str, Any]] | None = None,
         timeout_s: float | None = None,
     ) -> dict[str, Any]:
-        """Run one turn on the bound (or newly created) session."""
+        """Run one turn on the bound (or newly created) session.
+
+        If a turn is already in flight for this chat, the message is queued
+        as a follow-up: the caller returns immediately with {"queued": True}
+        and the queued texts are appended (as "[用户补充] …") in the next
+        prompt round once the current turn finishes — the agent sees them
+        with the conversation context intact.
+        """
         k = self.key(channel, chat_id)
-        with self._lock_for(k):  # serialize turns per chat
+        lock = self._lock_for(k)
+        if not lock.acquire(blocking=False):
+            # turn in flight: queue as follow-up, ack at once
+            with self._lock:
+                self._pending_followups.setdefault(k, []).append({
+                    "text": text, "images": images or [], "files": files or [],
+                })
+            key = f"{channel}:{chat_id}"
+            self._emit(key, "status", {"text": "已收到，将在当前回答结束后作为补充追加给 agent。"})
+            log.info(f"[{key}] follow-up queued mid-turn ({len(text)} chars)")
+            return {"queued": True, "session_id": None, "agent": None}
+        try:
+            return self._prompt_locked(channel, chat_id, text, agent, cwd,
+                                       images, files, timeout_s)
+        finally:
+            lock.release()
+
+    def _prompt_locked(
+        self,
+        channel: str,
+        chat_id: str,
+        text: str,
+        agent: str | None = None,
+        cwd: str | None = None,
+        images: list[bytes] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Caller holds the per-chat prompt lock. Runs one turn; then, while
+        follow-ups are queued, keeps prompting with the queued supplements
+        joined into a single "[用户补充]" block per round."""
+        k = self.key(channel, chat_id)
+        result: dict[str, Any] = {}
+        while True:
+            result = self._run_one_turn(channel, chat_id, text, agent, cwd,
+                                        images, files, timeout_s)
+            with self._lock:
+                pending = self._pending_followups.pop(k, [])
+            if not pending:
+                break
+            # join all queued follow-ups (in arrival order) into one supplement
+            parts: list[str] = []
+            sup_images: list[bytes] = []
+            sup_files: list[dict[str, Any]] = []
+            for m in pending:
+                if m["images"]:
+                    sup_images.extend(m["images"])
+                if m["files"]:
+                    sup_files.extend(m["files"])
+                parts.append(m["text"])
+            supplement = "\n".join(parts)
+            text = f"[用户补充] {supplement}"
+            images = sup_images or None
+            files = sup_files or None
+            agent = None
+            cwd = None
+            timeout_s = None
+        return result
+
+    def _run_one_turn(
+        self,
+        channel: str,
+        chat_id: str,
+        text: str,
+        agent: str | None = None,
+        cwd: str | None = None,
+        images: list[bytes] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        k = self.key(channel, chat_id)
+        if True:  # keep indentation of the original single-turn body
             if agent and agent not in self.agents:
                 raise UnknownAgent(f"agent {agent!r} not configured")
             with self._lock:
