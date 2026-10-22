@@ -519,10 +519,10 @@ class SessionManager:
 
     # -- media ---------------------------------------------------------------
     def _agent_cwd(self, agent_name: str) -> str | None:
-        """Agent workspace root: first whitelist entry (expanded) or None."""
+        """Agent workspace root: base dir of the first whitelist entry, or None."""
         spec = self.agents.get(agent_name)
         if spec and spec.cwd_whitelist:
-            return os.path.expanduser(spec.cwd_whitelist[0])
+            return _glob_root(spec.cwd_whitelist[0])
         return None
 
     def _media_dir(self, agent: str) -> str:
@@ -958,6 +958,27 @@ class SessionManager:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _glob_root(pattern: str) -> str:
+    """Base directory of a cwd whitelist pattern (``~`` expanded).
+
+    Whitelist entries are fnmatch patterns such as ``~/workspace/*``; the agent
+    workspace root must be the longest glob-free prefix, otherwise media files
+    land in a literal ``*`` directory and the media sentinel scans nothing.
+    """
+    pattern = os.path.expanduser(pattern)
+    if not any(ch in pattern for ch in "*?["):
+        return pattern
+    parts: list[str] = []
+    for part in pattern.split(os.sep):
+        if any(ch in part for ch in "*?["):
+            break
+        parts.append(part)
+    root = os.sep.join(parts)
+    if not root:
+        return os.sep if os.path.isabs(pattern) else "."
+    return root
 
 
 def _check_cwd(cwd: str, whitelist: list[str]) -> None:
