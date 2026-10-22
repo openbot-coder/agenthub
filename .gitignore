@@ -5,3 +5,8 @@ dist/
 .pytest_cache/
 config.local.yaml
 node_modules/
+# runtime state + local config backups (never committed)
+agenthub.db
+agenthub.db-shm
+agenthub.db-wal
+config.json.bak.*
