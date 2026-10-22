@@ -287,7 +287,13 @@ class WecomAibotChannel:
         elif kind == "delta":
             self._stream_append(chat_id, str(payload.get("text", "")))
         elif kind == "status":
-            self._stream_ensure(chat_id, str(payload.get("text", "")))
+            if payload.get("close_stream"):
+                # queued follow-up ack: the "正在处理…" bubble from this
+                # message's own ack would otherwise hang forever (a queued
+                # message never produces a final) — close it out instead.
+                self._stream_close(chat_id, str(payload.get("text", "")))
+            else:
+                self._stream_ensure(chat_id, str(payload.get("text", "")))
         elif kind == "tool_start":
             # show agent progress inside the stream bubble so long tool turns
             # don't look stuck

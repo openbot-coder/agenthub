@@ -381,7 +381,8 @@ class SessionManager:
                     "text": text, "images": images or [], "files": files or [],
                 })
             key = f"{channel}:{chat_id}"
-            self._emit(key, "status", {"text": "已收到，将在当前回答结束后作为补充追加给 agent。"})
+            self._emit(key, "status", {"text": "已收到，将在当前回答结束后作为补充追加给 agent。",
+                                        "close_stream": True})
             log.info(f"[{key}] follow-up queued mid-turn ({len(text)} chars)")
             return {"queued": True, "session_id": None, "agent": None}
         try:
