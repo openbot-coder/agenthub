@@ -501,13 +501,22 @@ class WecomAibotChannel:
                 with self._stream_lock:
                     self._req_ids.pop(chat_id, None)
                 return
-        # no live callback req_id: fall back to a proactive message
-        self.reply(chat_id, text) if text else None
-        if finished:
-            st["sent"] = True
-            with self._stream_lock:
-                self._req_ids.pop(chat_id, None)
-            self._logger.info(f"[wecom] stream finished via proactive message (callback req_id stale or absent) chat={chat_id}")
+        # No live callback req_id (stale or absent): proactive aibot_send_msg
+        # territory. Intermediate deltas are DROPPED — replying each would spam
+        # one full-snapshot message every 0.8s. Instead: a single notice the
+        # first time we notice staleness, then silence until the final text,
+        # which always goes out (possibly in overflow chunks).
+        if not finished:
+            if not st.get("proactive_noticed"):
+                st["proactive_noticed"] = True
+                self.reply(chat_id, "⏳ 回复时间较长，处理完成后将直接发送结果…")
+            return
+        st["sent"] = True
+        with self._stream_lock:
+            self._req_ids.pop(chat_id, None)
+        if text:
+            self.reply(chat_id, text)
+        self._logger.info(f"[wecom] stream finished via proactive message (callback req_id stale or absent) chat={chat_id}")
 
     def _send(self, obj: dict) -> None:
         raw = json.dumps(obj, ensure_ascii=False)

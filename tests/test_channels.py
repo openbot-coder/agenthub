@@ -178,8 +178,14 @@ def test_wecom_stream_falls_back_when_callback_req_stale():
     ch, ws = _make_wecom()
     ch._ws = ws
     ch._req_ids["c1"] = ("req-old", __import__("time").time() - 600)  # beyond TTL
-    ch.push_event("c1", "final", {"text": "late answer"})
-    respond = [m for m in ws.sent if m["cmd"] == "aibot_respond_msg"]
+    # intermediate deltas: only ONE proactive notice, no full-snapshot spam
+    for _ in range(5):
+        ch.push_event("c1", "delta", {"text": "more words "})
     send = [m for m in ws.sent if m["cmd"] == "aibot_send_msg"]
+    assert len(send) == 1 and "处理完成后" in json.dumps(send[0], ensure_ascii=False)
+    respond = [m for m in ws.sent if m["cmd"] == "aibot_respond_msg"]
     assert respond == []  # stale req_id must NOT be reused
-    assert send and "late answer" in json.dumps(send[-1])
+    # final: exactly one proactive message with the full text
+    ch.push_event("c1", "final", {"text": "late answer"})
+    send = [m for m in ws.sent if m["cmd"] == "aibot_send_msg"]
+    assert len(send) == 2 and "late answer" in json.dumps(send[-1], ensure_ascii=False)
