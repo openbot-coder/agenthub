@@ -37,7 +37,7 @@ def _channel() -> tuple[WecomAibotChannel, MockWS]:
 
 def test_small_final_single_stream_frame():
     ch, ws = _channel()
-    ch._req_ids["c1"] = "r1"
+    ch._req_ids["c1"] = ("r1", __import__("time").time())
     ch._stream_close("c1", "hello")
     streams = [m for m in ws.sent if m.get("cmd") == "aibot_respond_msg"]
     assert len(streams) == 1
@@ -47,7 +47,7 @@ def test_small_final_single_stream_frame():
 
 def test_large_final_splits_into_stream_plus_markdown():
     ch, ws = _channel()
-    ch._req_ids["c1"] = "r1"
+    ch._req_ids["c1"] = ("r1", __import__("time").time())
     big = "字" * 12000  # 3 bytes/char -> 36000 bytes > 19000 limit
     ch._stream_close("c1", big)
     streams = [m for m in ws.sent if m.get("cmd") == "aibot_respond_msg"]

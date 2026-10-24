@@ -77,7 +77,7 @@ def test_wecom_dispatch_text_and_permission():
                       "from": {"userid": "u1"}, "text": {"content": "hello\u200b"}}}
     ch._dispatch(frame, ws)
     assert len(got) == 1 and got[0].text == "hello" and got[0].chat_id == "c1"
-    assert ch._req_ids["c1"] == "r1"  # captured for the streaming reply
+    assert ch._req_ids["c1"][0] == "r1"  # captured for the streaming reply
 
 
 def test_wecom_allowed_users_drops_others():
@@ -91,7 +91,8 @@ def test_wecom_allowed_users_drops_others():
 def test_wecom_streaming_delta_coalesce_and_final():
     ch, ws = _make_wecom()
     ch._ws = ws  # pretend connected (stream sends go through the socket)
-    ch._req_ids["c1"] = "req-9"  # as set by an inbound callback
+    ch._req_ids["c1"] = ("req-9", __import__("time").time())  # fresh inbound callback
+    ch._req_ids["stale"] = ("req-old", __import__("time").time() - 600)  # expired callback
     ch.push_event("c1", "delta", {"text": "hello "})
     ch.push_event("c1", "delta", {"text": "world"})
     ch.push_event("c1", "final", {"text": "hello world"})
@@ -171,3 +172,14 @@ def test_weixin_no_edit_deltas_dropped_final_sent():
     assert not http.posts
     ch.push_event("u", "final", {"text": "full text"})
     assert http.posts[-1][1]["text"]["content"] == "full text"
+
+
+def test_wecom_stream_falls_back_when_callback_req_stale():
+    ch, ws = _make_wecom()
+    ch._ws = ws
+    ch._req_ids["c1"] = ("req-old", __import__("time").time() - 600)  # beyond TTL
+    ch.push_event("c1", "final", {"text": "late answer"})
+    respond = [m for m in ws.sent if m["cmd"] == "aibot_respond_msg"]
+    send = [m for m in ws.sent if m["cmd"] == "aibot_send_msg"]
+    assert respond == []  # stale req_id must NOT be reused
+    assert send and "late answer" in json.dumps(send[-1])

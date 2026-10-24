@@ -57,9 +57,9 @@ class WecomAibotChannel:
         self._ws = None  # current socket (set by _connect_and_serve)
         self.connection_state = "idle"
         self.connection_error: str = ""
-        # chat -> streaming state; chat -> last callback req_id (respond must reuse it)
+        # chat -> streaming state; chat -> (last callback req_id, recv time)
         self._streams: dict[str, dict] = {}
-        self._req_ids: dict[str, str] = {}
+        self._req_ids: dict[str, tuple[str, float]] = {}
         self._stream_lock = threading.Lock()
         # media upload acks: req_id -> {event, msg}
         self._pending_acks: dict[str, dict] = {}
@@ -165,6 +165,8 @@ class WecomAibotChannel:
         cmd = msg.get("cmd", "")
         if msg.get("errcode") is not None and not cmd:
             # ack/pong frame — route to a waiting media-upload _request() if any
+            if msg.get("errcode") != 0:
+                self._logger.warning(f"[wecom] gateway rejected frame: errcode={msg.get('errcode')} errmsg={msg.get('errmsg')} req_id={(msg.get('headers') or {}).get('req_id', '')}")
             self._deliver_ack(msg)
             return
         req_id = (msg.get("headers") or {}).get("req_id", "")
@@ -216,7 +218,7 @@ class WecomAibotChannel:
         # remember req_id for streaming replies keyed by chat
         if req_id:
             with self._stream_lock:
-                self._req_ids[chat_id] = req_id
+                self._req_ids[chat_id] = (req_id, time.time())
         text = clean_control_chars(text, max_len=100000).strip() if text else ""
         # group chat: only respond when @mentioned is handled by WeCom itself
         if not text and not images and not files:
@@ -469,23 +471,43 @@ class WecomAibotChannel:
             for chunk in overflow:
                 self.reply(chat_id, chunk)
 
+    # The inbound callback's req_id is only accepted by the WeCom gateway for a
+    # limited window (~minutes). After an approval round-trip the turn can
+    # outlive that window; frames reusing the stale req_id are silently
+    # rejected, so the user sees "clicked approve, nothing happened". Past the
+    # TTL, stream updates degrade to proactive aibot_send_msg messages.
+    _CALLBACK_REQ_TTL_S = 240.0
+
     def _reply_stream(self, chat_id: str, st: dict, text: str, finished: bool) -> None:
-        # official: reuse the CALLBACK's req_id in headers; stream.id identifies the bubble
-        req_id = self._req_ids.get(chat_id, "")
-        self._send(
-            {
-                "cmd": "aibot_respond_msg",
-                "headers": {"req_id": req_id},
-                "body": {
-                    "msgtype": "stream",
-                    "stream": {"id": st["req_id"], "finish": finished, "content": text},
-                },
-            }
-        )
+        entry = self._req_ids.get(chat_id)
+        req_id = ""
+        stale = True
+        if entry:
+            req_id, ts = entry
+            stale = (time.time() - ts) > self._CALLBACK_REQ_TTL_S
+        if req_id and not stale:
+            self._send(
+                {
+                    "cmd": "aibot_respond_msg",
+                    "headers": {"req_id": req_id},
+                    "body": {
+                        "msgtype": "stream",
+                        "stream": {"id": st["req_id"], "finish": finished, "content": text},
+                    },
+                }
+            )
+            if finished:
+                st["sent"] = True
+                with self._stream_lock:
+                    self._req_ids.pop(chat_id, None)
+                return
+        # no live callback req_id: fall back to a proactive message
+        self.reply(chat_id, text) if text else None
         if finished:
             st["sent"] = True
-            # proactive follow-ups after the stream need aibot_send_msg
-            self._req_ids.pop(chat_id, None)
+            with self._stream_lock:
+                self._req_ids.pop(chat_id, None)
+            self._logger.info(f"[wecom] stream finished via proactive message (callback req_id stale or absent) chat={chat_id}")
 
     def _send(self, obj: dict) -> None:
         raw = json.dumps(obj, ensure_ascii=False)
