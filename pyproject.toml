@@ -1,7 +1,7 @@
 [project]
-name = "agenthub"
-version = "0.1.0"
-description = "IM/NATS to local ACP (Agent Client Protocol) bridge - drive Claude Code, Codex, Gemini CLI, OpenCode from messaging front-ends"
+name = "agenthub-gateway"
+version = "0.2.0"
+description = "IM/NATS to ACP (Agent Client Protocol) gateway - drive Claude Code, Codex, Gemini CLI, OpenCode from messaging front-ends; orchestrates remote workers via acpclient"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "OpenBot", email = "openbot@vxquant.com" }]
@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "cryptography>=42",
     "websockets>=12",
+    "acpclient>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,7 @@ Documentation = "https://gitea.vxquant.com/vxquant/agenthub/src/branch/main/docs
 
 [project.scripts]
 agenthub = "agenthub.__main__:main"
+agenthub-gateway = "agenthub.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
